@@ -1,7 +1,0 @@
-"Date","Weight range","R-squared","Equation"
-"2026-02-02","High-load range","1.000","y = 0.9992x + 0.32"
-"2026-02-02","Low-load range","1.000","y = 0.9995x + 0.12"
-"2026-02-03","High-load range","1.000","y = 0.9994x + 0.21"
-"2026-02-03","Low-load range","1.000","y = 0.9995x + 0.05"
-"2026-02-04","High-load range","1.000","y = 0.9979x + 0.45"
-"2026-02-04","Low-load range","1.000","y = 0.9989x + 0.01"
