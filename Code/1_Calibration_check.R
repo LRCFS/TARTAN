@@ -53,11 +53,11 @@
 # ---- CONFIGURATION ----------------------------------------------------------
 
 data_dir   <- "Data/COF/"
-output_dir <- "Results"
+output_dir <- "Results/Session-Specific_Calibration_Check/"
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
 balance_resolution <- 0.01  # grams — resolution of the reference balance
-U_balance <- balance_resolution / sqrt(12)
+u_balance <- balance_resolution / sqrt(12)
 
 # ---- 1. LOAD BEFORE AND AFTER FILES -----------------------------------------
 
@@ -154,16 +154,19 @@ for (d in unique(tare_drift$experiment_date)) {
     cat(sprintf("  Tare drift over session: %+.3f g\n\n", drift$tare_drift_g))
 }
 
-write_csv(tare_summary, file.path(output_dir, "calibration_check_tare.csv"))
+write_csv(tare_summary, file.path(output_dir, "Session_check_tare.csv"))
 
 # ---- 4. CHI-SQUARED FUNCTIONS -----------------------------------------------
 # Identical to those in 01_LoadCell_Characterisation.R.
 
-compute_chi2 <- function(alpha, sigma_mech, M, X, sigma_X, U_M) {
-  n <- length(M)
+compute_chi2 <- function(alpha, sigma_mech, M, X, sigma_X, u_M) {
   residuals_sq <- (M - alpha * X)^2
-  denominators <- U_M^2 + (sigma_X * alpha)^2 + sigma_mech^2
-  (1 / (n - 1)) * sum(residuals_sq / denominators)
+  denominators <- u_M^2 + (sigma_X * alpha)^2 + sigma_mech^2
+  sum(residuals_sq / denominators)
+}
+
+compute_chi2_red <- function(chi2, n) {
+  chi2 / (n - 1)
 }
 
 find_optimal_alpha <- function(sigma_mech, M, X, sigma_X, U_M) {
@@ -173,50 +176,54 @@ find_optimal_alpha <- function(sigma_mech, M, X, sigma_X, U_M) {
   list(alpha = result$minimum, chi2 = result$objective)
 }
 
-find_sigma_mechanical <- function(M, X, sigma_X, U_M) {
-  opt0 <- find_optimal_alpha(0, M, X, sigma_X, U_M)
-  if (opt0$chi2 <= 1.0) return(0)
+find_sigma_mechanical <- function(M, X, sigma_X, u_M) {
+  n <- length(M)
+  opt0 <- find_optimal_alpha(0, M, X, sigma_X, u_M)
+  if (compute_chi2_red(opt0$chi2, n) <= 1.0) return(0)
+  
   optimise(
-    f        = function(s) (find_optimal_alpha(s, M, X, sigma_X, U_M)$chi2 - 1.0)^2,
-    interval = c(0, 10))$minimum
+    f = function(s) {
+      opt_s <- find_optimal_alpha(s, M, X, sigma_X, u_M)
+      (compute_chi2_red(opt_s$chi2, n) - 1.0)^2
+    },
+    interval = c(0, 10)
+  )$minimum
 }
 
-compute_sigma_alpha <- function(alpha_opt, chi2_min, sigma_mech, M, X, sigma_X, U_M) {
-  # GUM-compatible 1-sigma interval:
-  # The 1-sigma confidence interval on alpha is the set of alpha values for
-  # which the reduced chi-squared exceeds its minimum by no more than 1/(n-1).
-  # This follows directly from chi-squared statistics and is consistent with
-  # the GUM framework for parameter uncertainty from a least-squares fit.
-  n <- length(M)
-  threshold <- chi2_min + 1 / (n - 1)
+compute_u_alpha <- function(alpha_opt, chi2_min, sigma_mech, M, X, sigma_X, u_M) {
+  chi2_threshold <- chi2_min + 1
   
-  lower <- tryCatch(
-    uniroot(function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, U_M) - threshold,
-            interval = c(alpha_opt - 0.05, alpha_opt))$root,
+  alpha_lower <- tryCatch(
+    uniroot(
+      function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, u_M) - chi2_threshold,
+      interval = c(alpha_opt - 0.05, alpha_opt)
+    )$root,
     error = function(e) {
-      warning("compute_sigma_alpha: lower bound not found, using fallback.")
+      warning("compute_u_alpha: lower bound not found, using fallback.")
       alpha_opt - 0.05
     }
   )
   
-  upper <- tryCatch(
-    uniroot(function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, U_M) - threshold,
-            interval = c(alpha_opt, alpha_opt + 0.05))$root,
+  alpha_upper <- tryCatch(
+    uniroot(
+      function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, u_M) - chi2_threshold,
+      interval = c(alpha_opt, alpha_opt + 0.05)
+    )$root,
     error = function(e) {
-      warning("compute_sigma_alpha: upper bound not found, using fallback.")
+      warning("compute_u_alpha: upper bound not found, using fallback.")
       alpha_opt + 0.05
     }
   )
   
-  list(sigma_alpha = (upper - lower) / 2,
-       threshold   = threshold,
-       lower       = lower,
-       upper       = upper,
-       sigma_mech  = sigma_mech)
+  list(
+    u_alpha = (alpha_upper - alpha_lower) / 2,
+    chi2_threshold = chi2_threshold,
+    alpha_lower = alpha_lower,
+    alpha_upper = alpha_upper
+  )
 }
 
 run_chi2 <- function(dat) {
-  # Summarise to mean per weight (same as in characterisation script)
   summ <- dat %>%
     filter(target_g > 0) %>%
     group_by(target_g) %>%
@@ -228,19 +235,26 @@ run_chi2 <- function(dat) {
       .groups = "drop"
     )
   
-  M  <- summ$target_g
-  X  <- summ$mean_force_g
-  sX <- summ$se_force_g
-  UM <- rep(U_balance, length(M))
+  M   <- summ$target_g
+  X   <- summ$mean_force_g
+  sX  <- summ$se_force_g
+  u_M <- rep(u_balance, length(M))
+  n   <- length(M)
   
-  sm  <- find_sigma_mechanical(M, X, sX, UM)
-  opt <- find_optimal_alpha(sm, M, X, sX, UM)
-  sa  <- compute_sigma_alpha(opt$alpha, opt$chi2, sm, M, X, sX, UM)
+  sm  <- find_sigma_mechanical(M, X, sX, u_M)
+  opt <- find_optimal_alpha(sm, M, X, sX, u_M)
+  ua  <- compute_u_alpha(opt$alpha, opt$chi2, sm, M, X, sX, u_M)
   
-  list(alpha           = opt$alpha,
-       chi2_min        = opt$chi2,
-       sigma_alpha     = sa$sigma_alpha,
-       sigma_mechanical = sm)
+  list(
+    alpha            = opt$alpha,
+    chi2_min         = opt$chi2,
+    chi2_red_min     = compute_chi2_red(opt$chi2, n),
+    chi2_threshold   = ua$chi2_threshold,
+    alpha_lower      = ua$alpha_lower,
+    alpha_upper      = ua$alpha_upper,
+    u_alpha          = ua$u_alpha,
+    sigma_mechanical = sm
+  )
 }
 
 # ---- 5. COMPUTE SESSION-SPECIFIC ALPHA PER DATE -----------------------------
@@ -270,13 +284,13 @@ calib_params_list <- map_dfr(experiment_dates, function(d) {
   # Stability term across the session
   sigma_within <- abs(chi2_after$alpha - chi2_before$alpha) / 2
   
-  # Uncertainty on the mean alpha from before/after chi2 fits
+  # Standard uncertainty on the mean alpha from before/after chi-squared fits
   u_alpha_mean <- sqrt(
-    chi2_before$sigma_alpha^2 + chi2_after$sigma_alpha^2
+    chi2_before$u_alpha^2 + chi2_after$u_alpha^2
   ) / 2
   
-  # Combined uncertainty: fit uncertainty + within-session stability
-  sigma_alpha_combined <- sqrt(u_alpha_mean^2 + sigma_within^2)
+  # Combined standard uncertainty on alpha_session
+  u_alpha_session <- sqrt(u_alpha_mean^2 + sigma_within^2)
   
   # sigma_mechanical: use mean from before and after
   sigma_mech <- mean(c(chi2_before$sigma_mechanical,
@@ -288,20 +302,38 @@ calib_params_list <- map_dfr(experiment_dates, function(d) {
   cat(sprintf("  alpha_after   = %.8f (chi2 = %.4f)\n",
               chi2_after$alpha,  chi2_after$chi2_min))
   cat(sprintf("  alpha_session = %.8f\n",  alpha_session))
-  cat(sprintf("  sigma_within  = %.8f\n",  sigma_within))
-  cat(sprintf("  sigma_alpha   = %.8f (chi2: %.8f + within: %.8f)\n\n",
-              sigma_alpha_combined, u_alpha_mean, sigma_within))
+  cat(sprintf("  sigma_within    = %.8f\n", sigma_within))
+  cat(sprintf("  u_alpha_mean    = %.8f\n", u_alpha_mean))
+  cat(sprintf("  u_alpha_session = %.8f\n\n", u_alpha_session))
   
   tibble(
-    experiment_date      = d,
-    alpha_before         = chi2_before$alpha,
-    alpha_after          = chi2_after$alpha,
-    alpha_session        = alpha_session,
-    sigma_within         = sigma_within,
-    sigma_alpha_chi2     = u_alpha_mean,
-    sigma_alpha_combined = sigma_alpha_combined,
-    sigma_mechanical     = sigma_mech,
-    U_balance            = U_balance
+    experiment_date       = d,
+    alpha_before          = chi2_before$alpha,
+    alpha_after           = chi2_after$alpha,
+    
+    chi2_min_before       = chi2_before$chi2_min,
+    chi2_min_after        = chi2_after$chi2_min,
+    chi2_red_min_before   = chi2_before$chi2_red_min,
+    chi2_red_min_after    = chi2_after$chi2_red_min,
+    
+    chi2_threshold_before = chi2_before$chi2_threshold,
+    chi2_threshold_after  = chi2_after$chi2_threshold,
+    
+    alpha_lower_before    = chi2_before$alpha_lower,
+    alpha_upper_before    = chi2_before$alpha_upper,
+    alpha_lower_after     = chi2_after$alpha_lower,
+    alpha_upper_after     = chi2_after$alpha_upper,
+    
+    u_alpha_before        = chi2_before$u_alpha,
+    u_alpha_after         = chi2_after$u_alpha,
+    
+    alpha_session         = alpha_session,
+    sigma_within          = sigma_within,
+    u_alpha_mean          = u_alpha_mean,
+    u_alpha_session       = u_alpha_session,
+    
+    sigma_mechanical      = sigma_mech,
+    u_balance             = u_balance
   )
 })
 
@@ -312,7 +344,7 @@ print(calib_params_list, width = Inf)
 
 # Full session parameter table (used by 03_Analysis.R for per-date join)
 write_csv(calib_params_list,
-          file.path(output_dir, "calibration_parameters.csv"))
+          file.path(output_dir, "Session_calibration_parameters.csv"))
 
 # Per-weight summary for diagnostics
 calib_check_summary <- calib_checks %>%

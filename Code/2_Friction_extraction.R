@@ -43,7 +43,7 @@
 # ---- CONFIGURATION ----------------------------------------------------------
 
 data_dir   <- "Data/COF/"
-output_dir <- "Results"
+output_dir <- "Results/Session-Specific_Calibration_Check/"
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
 # Actual measured masses of the transfer weights (precision balance)
@@ -135,9 +135,9 @@ results <- map_dfr(csv_files, function(fp) {
 # Preliminary uncorrected mu (for diagnostics — alpha correction in Script 03)
 results <- results %>%
   mutate(
-    weight_actual      = M_transfer[as.character(weight_g)],
-    mu_static_uncorr   = force_static_g  / weight_actual,
-    mu_dynamic_uncorr  = force_dynamic_g / weight_actual
+    M_actual         = M_transfer[as.character(weight_g)],
+    mu_s_uncorrected = force_static_g  / M_actual,
+    mu_d_uncorrected = force_dynamic_g / M_actual
   )
 
 cat(sprintf("Processed %d files.\n\n", nrow(results)))
@@ -145,11 +145,11 @@ cat("Results preview (first 15 rows, uncorrected mu):\n")
 print(results %>%
         dplyr::select(weight_g, speed_cm_s, rep_num,
                       force_static_g, force_dynamic_g,
-                      mu_static_uncorr, mu_dynamic_uncorr) %>%
+                      mu_s_uncorrected, mu_d_uncorrected) %>%
         head(15),
       width = Inf)
 
-write_csv(results, file.path(output_dir, "all_results.csv"))
+write_csv(results, file.path(output_dir, "all_results_uncorrected.csv"))
 
 # ---- 3. FORCE CURVE PLOT FUNCTION -------------------------------------------
 
@@ -232,32 +232,12 @@ p_example <- plot_one_rep(example_row$filename, y_max) +
         axis.title = element_text(size = 10))
 
 print(p_example)
-ggsave(file.path(output_dir, "example_force_curve.png"),
+ggsave(file.path(output_dir, "example_force_curve_uncorrected.png"),
        p_example, width = 15, height = 10, units = "cm", dpi = 600)
 
-# ---- 5. RAW DIAGNOSTIC FORCE-CURVE FIGURES ----------------------------------
-# These figures are for visual inspection only and are plotted from raw force_g
-# values. Publication-ready corrected force-curve figures are produced in
-# 03_Analysis.R after alpha_session has been applied.
+# ---- 5. FULL DIAGNOSTIC: 9 FIGURES (one per condition, all replicates) ------
 
-example_files <- results %>%
-  mutate(weight_g_f = factor(weight_g), speed_cm_s_f = factor(speed_cm_s)) %>%
-  group_by(weight_g_f, speed_cm_s_f) %>%
-  slice(1) %>%
-  pull(filename)
-
-example_plots   <- map(example_files, plot_one_rep, y_max = y_max)
-p_overview      <- wrap_plots(example_plots, ncol = 3)
-print(p_overview)
-ggsave(file.path(output_dir, "example_force_curves.png"),
-       p_overview,
-       width  = 15,
-       height = ceiling(length(example_plots) / 3) * 4,
-       dpi    = 300)
-
-# ---- 6. FULL DIAGNOSTIC: 9 FIGURES (one per condition, all replicates) ------
-
-force_curves_dir <- file.path(output_dir, "force_curves")
+force_curves_dir <- file.path(output_dir, "force_curves_uncorrected")
 dir.create(force_curves_dir, showWarnings = FALSE)
 
 conditions <- results %>%

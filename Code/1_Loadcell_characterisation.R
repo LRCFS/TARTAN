@@ -44,7 +44,7 @@
 # ---- CONFIGURATION ----------------------------------------------------------
 
 data_dir   <- "Data/Calibration curve/"
-output_dir <- "Results"
+output_dir <- "Results/Load-cell_characterisation/"
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
 balance_resolution <- 0.01  # grams — resolution of the reference balance
@@ -215,7 +215,7 @@ find_sigma_mechanical <- function(M, X, sigma_X, U_M) {
     interval = c(0, 10))$minimum
 }
 
-compute_sigma_alpha <- function(alpha_opt, chi2_min, sigma_mech, M, X, sigma_X, U_M) {
+compute_u_alpha <- function(alpha_opt, chi2_min, sigma_mech, M, X, sigma_X, U_M) {
   # GUM-compatible 1-sigma interval:
   # The 1-sigma confidence interval on alpha is the set of alpha values for
   # which the reduced chi-squared exceeds its minimum by no more than 1/(n-1).
@@ -228,7 +228,7 @@ compute_sigma_alpha <- function(alpha_opt, chi2_min, sigma_mech, M, X, sigma_X, 
     uniroot(function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, U_M) - threshold,
             interval = c(alpha_opt - 0.05, alpha_opt))$root,
     error = function(e) {
-      warning("compute_sigma_alpha: lower bound not found, using fallback.")
+      warning("compute_u_alpha: lower bound not found, using fallback.")
       alpha_opt - 0.05
     }
   )
@@ -237,12 +237,12 @@ compute_sigma_alpha <- function(alpha_opt, chi2_min, sigma_mech, M, X, sigma_X, 
     uniroot(function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, U_M) - threshold,
             interval = c(alpha_opt, alpha_opt + 0.05))$root,
     error = function(e) {
-      warning("compute_sigma_alpha: upper bound not found, using fallback.")
+      warning("compute_u_alpha: upper bound not found, using fallback.")
       alpha_opt + 0.05
     }
   )
   
-  list(sigma_alpha = (upper - lower) / 2,
+  list(u_alpha = (upper - lower) / 2,
        threshold   = threshold,
        alpha_min   = lower,
        alpha_max   = upper,
@@ -257,22 +257,25 @@ chi2_results <- calib_for_lm %>%
     sX <- .x$se_force_g; UM <- rep(U_balance, length(M))
     sm  <- find_sigma_mechanical(M, X, sX, UM)
     opt <- find_optimal_alpha(sm, M, X, sX, UM)
-    sa  <- compute_sigma_alpha(opt$alpha, opt$chi2, sm, M, X, sX, UM)
-    tibble(n_points = length(M), sigma_mechanical = sm,
-           alpha = opt$alpha, chi2_min = opt$chi2,
-           chi2_threshold = sa$threshold,
-           alpha_min = sa$alpha_min,
-           alpha_max = sa$alpha_max,
-           sigma_alpha = sa$sigma_alpha)
+    sa  <- compute_u_alpha(opt$alpha, opt$chi2, sm, M, X, sX, UM)
+    tibble(
+      n_points = length(M),
+      sigma_mechanical = sm,
+      alpha = opt$alpha,
+      chi2_min = opt$chi2,
+      alpha_min = sa$alpha_min,
+      alpha_max = sa$alpha_max,
+      u_alpha = sa$u_alpha
+    )
   }) %>%
   ungroup()
 
 cat("\n=== Chi-squared results ===\n")
 print(chi2_results %>%
         dplyr::select(session_label, type, n_points,
-                      sigma_mechanical, alpha, chi2_min, sigma_alpha),
+                      sigma_mechanical, alpha, chi2_min, u_alpha),
       width = Inf, n = 30)
-write_csv(chi2_results, file.path(output_dir, "chi2_results_all_sessions.csv"))
+write_csv(chi2_results, file.path(output_dir, "chi2_results_Load-cell_characterisation.csv"))
 
 # ---- 7. DRIFT ANALYSIS ACROSS SESSIONS --------------------------------------
 
@@ -290,7 +293,7 @@ drift_summary <- chi2_results %>%
 cat("\n=== Drift across calibration sessions ===\n")
 print(drift_summary, width = Inf)
 write_csv(drift_summary,
-          file.path(output_dir, "calibration_drift_across_sessions.csv"))
+          file.path(output_dir, "Load-cell_characterisation_drift_across_sessions.csv"))
 
 # ---- 8. FIGURES -------------------------------------------------------------
 
@@ -385,8 +388,8 @@ drift_panel <- function(range_label, show_x = TRUE) {
     geom_hline(yintercept = 1.0, linetype = "dashed", colour = "grey50") +
     geom_line(linewidth = 0.6, colour = "grey40") +
     geom_point(size = 3, colour = "grey20") +
-    geom_errorbar(aes(ymin = alpha - sigma_alpha,
-                      ymax = alpha + sigma_alpha),
+    geom_errorbar(aes(ymin = alpha - u_alpha,
+                      ymax = alpha + u_alpha),
                   width = 0.2, colour = "grey20") +
     labs(x = NULL,
          y = bquote(alpha ~ .(paste0("(", range_label, ")")))) +
@@ -480,7 +483,7 @@ if (nrow(dat_paper_scatter) == 0) {
               aes(x = session_label_short, y = mean_error,
                   label = round(mean_error, 2)),
               colour = "red", vjust = 0, hjust = -1.2, size = 3) +
-    labs(x = "\nCalibration session",
+    labs(x = "\nSession",
          y = paste0("Measurement error (g)")) +
     theme_bw(base_size = 15) +
     theme(axis.text.x = element_text(angle = 45, hjust = 1))

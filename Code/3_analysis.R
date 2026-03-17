@@ -45,13 +45,13 @@
 
 # ---- CONFIGURATION ----------------------------------------------------------
 
-output_dir <- "Results"
+output_dir <- "Results/Session-Specific_Calibration_Check/"
 
 # ---- 1. LOAD CALIBRATION PARAMETERS ----------------------------------------
 
 cat("=== LOADING CALIBRATION PARAMETERS ===\n\n")
 
-calib_params <- read_csv(file.path(output_dir, "calibration_parameters.csv"),
+calib_params <- read_csv(file.path(output_dir, "Session_calibration_parameters.csv"),
                          show_col_types = FALSE)
 
 cat(sprintf("Session-specific alpha values (%d session(s)):\n",
@@ -64,7 +64,7 @@ cat("\n")
 
 # ---- 2. LOAD FRICTION RESULTS -----------------------------------------------
 
-results_raw <- read_csv(file.path(output_dir, "all_results.csv"),
+results_raw <- read_csv(file.path(output_dir, "all_results_uncorrected.csv"),
                         show_col_types = FALSE)
 cat(sprintf("Loaded %d friction results.\n\n", nrow(results_raw)))
 
@@ -75,9 +75,13 @@ cat(sprintf("Loaded %d friction results.\n\n", nrow(results_raw)))
 
 results <- results_raw %>%
   left_join(calib_params %>%
-              dplyr::select(experiment_date, alpha_session,
-                            sigma_alpha_combined, sigma_mechanical,
-                            U_balance),
+              dplyr::select(
+                experiment_date,
+                alpha_session,
+                u_alpha_session,
+                sigma_mechanical,
+                u_balance
+              ),
             by = c("date_str" = "experiment_date"))
 
 unmatched <- results %>% filter(is.na(alpha_session))
@@ -98,65 +102,61 @@ if (nrow(unmatched) > 0) {
 #
 # Uncertainty propagation follows the GUM framework.
 #
-# Components:
-#   U_F      = sigma_mechanical
-#              Mechanical / instrumental force uncertainty carried forward from
-#              the calibration check.
+# Components (all standard uncertainties):
+#   u_F_mech       = sigma_mechanical
+#                    Mechanical / instrumental force uncertainty carried
+#                    forward from the calibration check.
 #
-#   U_alpha  = sigma_alpha_combined
-#              Combined calibration uncertainty on alpha_session, including:
-#                (i) fit-derived uncertainty on alpha from the chi-squared
-#                    profile, and
-#                (ii) within-session stability from the before/after difference.
+#   u_alpha_session = u_alpha_session
+#                    Combined standard uncertainty on alpha_session, including:
+#                      (i) fit-derived uncertainty from the chi-squared profile,
+#                      (ii) within-session stability from the before/after difference.
 #
-#   U_M      = U_balance
-#              Uncertainty on the applied transfer mass from the balance
-#              resolution.
+#   u_M            = u_balance
+#                    Standard uncertainty on the applied transfer mass from the
+#                    balance resolution.
 #
-# Corrected-force uncertainty:
-#   U(F_corrected) / F_corrected =
-#       sqrt((U_F / F_raw)^2 + (U_alpha / alpha_session)^2)
+# Corrected-force standard uncertainty:
+#   u(F_corrected) / F_corrected =
+#       sqrt((u_F_mech / F_raw)^2 + (u_alpha_session / alpha_session)^2)
 #
-# Friction-coefficient uncertainty:
-#   U(mu) / mu =
-#       sqrt((U(F_corrected) / F_corrected)^2 + (U_M / M_actual)^2)
+# Friction-coefficient standard uncertainty:
+#   u(mu) / mu =
+#       sqrt((u(F_corrected) / F_corrected)^2 + (u_M / M_actual)^2)
 #
-# Expanded uncertainties are reported with k = 2.
+# Expanded uncertainties are then reported with k = 2.
 
 M_transfer <- c("200" = 200.00, "500" = 498.85, "800" = 799.37)
 
 results <- results %>%
   mutate(
-    # Session-specific corrected forces
-    Fstat_corrected   = force_static_g  * alpha_session,
-    Fdyn_corrected    = force_dynamic_g * alpha_session,
+    Fstat_corrected = force_static_g  * alpha_session,
+    Fdyn_corrected  = force_dynamic_g * alpha_session,
     
-    # Force uncertainty (mechanical component from load cell characterisation)
-    U_F = sigma_mechanical,
+    u_F_mech = sigma_mechanical,
     
-    # Corrected force uncertainty (GUM quadrature: force + alpha components)
-    U_Fstat_corrected = Fstat_corrected * sqrt(
-      (U_F / force_static_g)^2 + (sigma_alpha_combined / alpha_session)^2),
-    U_Fdyn_corrected  = Fdyn_corrected * sqrt(
-      (U_F / force_dynamic_g)^2 + (sigma_alpha_combined / alpha_session)^2),
+    u_Fstat_corrected = Fstat_corrected * sqrt(
+      (u_F_mech / force_static_g)^2 + (u_alpha_session / alpha_session)^2
+    ),
+    u_Fdyn_corrected = Fdyn_corrected * sqrt(
+      (u_F_mech / force_dynamic_g)^2 + (u_alpha_session / alpha_session)^2
+    ),
     
-    # Actual transfer mass and its uncertainty
     M_actual = M_transfer[as.character(weight_g)],
-    U_M      = U_balance,
+    u_M      = u_balance,
     
-    # Static coefficient of friction
     mu_s = Fstat_corrected / M_actual,
-    U_mu_s = mu_s * sqrt(
-      (U_Fstat_corrected / Fstat_corrected)^2 + (U_M / M_actual)^2),
-    U_mu_s_expanded = 2 * U_mu_s,   # k = 2 for 95% expanded uncertainty
+    u_mu_s = mu_s * sqrt(
+      (u_Fstat_corrected / Fstat_corrected)^2 + (u_M / M_actual)^2
+    ),
+    U_mu_s = 2 * u_mu_s,
     
-    # Dynamic coefficient of friction
     mu_d = Fdyn_corrected / M_actual,
-    U_mu_d = mu_d * sqrt(
-      (U_Fdyn_corrected / Fdyn_corrected)^2 + (U_M / M_actual)^2),
-    U_mu_d_expanded = 2 * U_mu_d,
+    u_mu_d = mu_d * sqrt(
+      (u_Fdyn_corrected / Fdyn_corrected)^2 + (u_M / M_actual)^2
+    ),
+    U_mu_d = 2 * u_mu_d,
     
-    # Factors for plotting and ANOVA
     weight_f = factor(weight_g,   levels = c(200, 500, 800)),
     speed_f  = factor(speed_cm_s, levels = c(1.0, 1.5, 2.0))
   )
@@ -165,8 +165,8 @@ cat("Corrected results preview (first 10 rows):\n")
 print(results %>%
         dplyr::select(filename, weight_g, speed_cm_s, date_str,
                       alpha_session, Fstat_corrected,
-                      mu_s, U_mu_s_expanded,
-                      mu_d, U_mu_d_expanded) %>%
+                      mu_s, U_mu_s,
+                      mu_d, U_mu_d) %>%
         head(10),
       width = Inf)
 
@@ -276,18 +276,60 @@ p_example_corr <- plot_one_rep_corrected(
 ggsave(file.path(output_dir, "example_force_curve_corrected.png"),
        p_example_corr, width = 15, height = 10, units = "cm", dpi = 600)
 
-# ---- 5.B SUMMARY STATISTICS --------------------------------------------------
+# ---- 5C. SAVE CORRECTED FORCE-CURVE FIGURES BY CONDITION --------------------
+
+corrected_curve_dir <- file.path(output_dir, "force_curves_corrected")
+dir.create(corrected_curve_dir, showWarnings = FALSE)
+
+conditions <- results %>%
+  distinct(weight_g, speed_cm_s) %>%
+  arrange(weight_g, speed_cm_s)
+
+for (i in seq_len(nrow(conditions))) {
+  w <- conditions$weight_g[i]
+  s <- conditions$speed_cm_s[i]
+  
+  condition_rows <- results %>%
+    filter(weight_g == w, speed_cm_s == s) %>%
+    arrange(rep_num)
+  
+  cat(sprintf("  %dg, %.1f cm/s: %d replicates\n", w, s, nrow(condition_rows)))
+  
+  plots <- map2(
+    condition_rows$filename,
+    condition_rows$alpha_session,
+    ~ plot_one_rep_corrected(.x, .y, y_max = y_max_corr)
+  )
+  
+  combined <- wrap_plots(plots, ncol = 2) +
+    plot_annotation(
+      title = paste0(w, " g, ", s, " cm/s"),
+      theme = theme(plot.title = element_text(size = 13, face = "bold"))
+    )
+  
+  fname_out <- sprintf("force_curves_corrected_%dg_%.0fcms.png", w, s * 10)
+  
+  ggsave(
+    file.path(corrected_curve_dir, fname_out),
+    combined,
+    width = 8,
+    height = 12,
+    dpi = 600
+  )
+}
+
+# ---- 6. SUMMARY STATISTICS --------------------------------------------------
 
 summary_stats <- results %>%
   group_by(weight_f, speed_f) %>%
   summarise(
-    n              = n(),
-    mu_s_mean      = mean(mu_s,            na.rm = TRUE),
-    mu_s_sd        = sd(mu_s,              na.rm = TRUE),
-    mu_s_U_mean    = mean(U_mu_s_expanded, na.rm = TRUE),
-    mu_d_mean      = mean(mu_d,            na.rm = TRUE),
-    mu_d_sd        = sd(mu_d,              na.rm = TRUE),
-    mu_d_U_mean    = mean(U_mu_d_expanded, na.rm = TRUE),
+    n           = n(),
+    mu_s_mean   = mean(mu_s,  na.rm = TRUE),
+    mu_s_sd     = sd(mu_s,    na.rm = TRUE),
+    U_mu_s_mean = mean(U_mu_s, na.rm = TRUE),
+    mu_d_mean   = mean(mu_d,  na.rm = TRUE),
+    mu_d_sd     = sd(mu_d,    na.rm = TRUE),
+    U_mu_d_mean = mean(U_mu_d, na.rm = TRUE),
     .groups = "drop"
   )
 
@@ -295,7 +337,7 @@ cat("\n=== SUMMARY (mean ± SD, mean expanded U at k = 2) ===\n")
 print(summary_stats, width = Inf)
 write_csv(summary_stats, file.path(output_dir, "summary_corrected.csv"))
 
-# ---- 6. STATISTICAL ANALYSIS ------------------------------------------------
+# ---- 7. STATISTICAL ANALYSIS ------------------------------------------------
 
 cat("\n=== ASSUMPTION CHECKS ===\n")
 
