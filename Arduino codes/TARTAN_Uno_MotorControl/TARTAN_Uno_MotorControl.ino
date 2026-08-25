@@ -1,65 +1,24 @@
 // ============================================================
-// TARTAN – Motor Control Firmware
-// Arduino Uno Rev 3
+// TARTAN — Uno: Motors + endstops only
+// NO streaming. Sends event messages only when something happens.
+// The loop() does nothing except step motors — no Serial calls
+// during motion.
 //
-// Controls two synchronised NEMA 17 stepper motors via TMC2209
-// stepper drivers. Provides homing (end-stop based),
-// controlled movement at a defined speed and distance, and an
-// emergency stop, all via a simple serial command interface.
+// Endstops: D8 (Left), D9 (Right) — ACTIVE LOW
 //
-// Commands can be sent directly from the Arduino IDE Serial Monitor
-// (set to 115200 baud, Newline line ending) or from any
-// serial terminal.
+// Commands:
+//   MOVE <mm> <UP|DOWN> <speed_cm_s>   e.g. MOVE 200 UP 2.0
+//   HOME_HIT <speed_cm_s>             e.g. HOME_HIT 1.0
+//   OFF
+//   HELP
 //
-// ── Wiring ────────────────────────────────────────────────
-//   D2  – X_STEP  (left  motor driver, step pulse)
-//   D3  – X_DIR   (left  motor driver, direction)
-//   D4  – Y_STEP  (right motor driver, step pulse)
-//   D5  – Y_DIR   (right motor driver, direction)
-//   D8  – Left  end-stop (normally open, active LOW)
-//   D9  – Right end-stop (normally open, active LOW)
-//
-//   Both driver ENABLE pins should be wired to GND (always
-//   enabled), or controlled separately if motor de-energisation
-//   between moves is required.
-//
-// ── Motion calibration ────────────────────────────────────
-//   STEPS_PER_MM must be set to match the lead screw pitch and
-//   driver microstepping configuration of the build.
-//   The value used in this study (400.0) corresponds to a
-//   200 step/rev motor with 1/2 microstepping on a lead screw
-//   with 2.5 mm pitch. Verify empirically before use:
-//   command a known distance and measure the actual travel.
-//
-// ── Serial interface ──────────────────────────────────────
-//   Baud: 115200  |  Line ending: Newline (\n)
-//
-//   Commands:
-//     MOVE <mm> <UP|DOWN> <speed_cm_s>
-//         Move the platform by <mm> millimetres in the specified
-//         direction at <speed_cm_s> cm/s.
-//         e.g.  MOVE 10 UP 2.0
-//               MOVE 50 DOWN 1.0
-//
-//     HOME_HIT <speed_cm_s>
-//         Drive the platform downward at the specified speed
-//         until one or both end-stops are triggered, then stop.
-//         e.g.  HOME_HIT 1.0
-//
-//     OFF
-//         Stop all motor motion immediately.
-//
-//     HELP
-//         Print a summary of available commands.
-//
-//   Event messages (responses from the board):
-//     EVENT,MOVE_START,<mm>,<dir>  – move has begun
-//     EVENT,MOVE_DONE              – move completed normally
-//     EVENT,HOME_START             – homing has begun
-//     EVENT,HOME_DONE              – end-stop reached
-//     EVENT,HOME_TIMEOUT           – homing stopped after 30 s
-//                                    safety timeout
-//     EVENT,OFF                    – motors stopped by command
+// Events (sent only when state changes — never during stepping):
+//   EVENT,MOVE_START,<mm>,<dir>
+//   EVENT,MOVE_DONE
+//   EVENT,HOME_START
+//   EVENT,HOME_DONE
+//   EVENT,HOME_TIMEOUT
+//   EVENT,OFF
 // ============================================================
 
 #include <Arduino.h>

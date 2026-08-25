@@ -1,71 +1,21 @@
 // ============================================================
-// TARTAN – Load Cell Acquisition Firmware
-// Arduino Nano Every
+// TARTAN — Nano: Load cell only (HX711)
+// Electrically isolated from motor circuit — powered by its own USB.
 //
-// Interfaces with a strain-gauge load cell via an HX711 24-bit
-// analogue-to-digital converter. Handles tare, manual scale
-// factor entry, EEPROM persistence of the calibration factor,
-// and continuous force streaming to the host computer at 10 Hz.
+// HX711: DT=D7, SCK=D6
 //
-// Commandscan be sent directly from the Arduino IDE Serial Monitor
-// (set to 115200 baud, Newline line ending) or from any
-// serial terminal.
+// Commands:
+//   TARE
+//   STREAM_ON
+//   STREAM_OFF
+//   RAW <n>               e.g. RAW 20
+//   SET_SCALE <value>     e.g. SET_SCALE -7050.0
+//   GET_SCALE
+//   SAVE_SCALE
+//   LOAD_SCALE
 //
-// Requires the HX711 library by Bogdan Necula / bogde:
-//   https://github.com/bogde/HX711
-//
-// ── Wiring ────────────────────────────────────────────────
-//   D7  – HX711 DT  (data)
-//   D6  – HX711 SCK (clock)
-//   5V  – HX711 VCC
-//   GND – HX711 GND
-//
-// ── Calibration procedure ─────────────────────────────────
-//   1. Send TARE with no load on the cell.
-//   2. Send RAW 20 with no load — note the value (should be ~0).
-//   3. Place a known mass on the load cell.
-//   4. Send RAW 20 again — note the raw value with mass.
-//   5. Compute: scale_factor = (raw_with_mass - raw_zero) / mass_g
-//   6. Send SET_SCALE <scale_factor>
-//   7. Verify with STREAM_ON — readings should match the known mass.
-//   8. Send SAVE_SCALE to persist the factor to EEPROM.
-//      The factor is reloaded automatically on next power-up.
-//
-// ── Serial interface ──────────────────────────────────────
-//   Baud: 115200  |  Line ending: Newline (\n)
-//
-//   Commands:
-//     TARE
-//         Zero the load cell at the current reading.
-//
-//     RAW <n>
-//         Read and print the average of <n> raw ADC counts
-//         (no scale factor applied). Used during calibration.
-//         e.g.  RAW 20
-//
-//     SET_SCALE <value>
-//         Set the calibration scale factor manually.
-//         e.g.  SET_SCALE -7050.0
-//
-//     GET_SCALE
-//         Print the currently active scale factor.
-//
-//     SAVE_SCALE
-//         Write the current scale factor to EEPROM so it
-//         survives power cycling.
-//
-//     LOAD_SCALE
-//         Reload the scale factor from EEPROM.
-//
-//     STREAM_ON
-//         Begin streaming force readings at 10 Hz.
-//         Output format: t_ms,force_g
-//
-//     STREAM_OFF
-//         Stop streaming.
-//
-//   Responses prefixed with '#' are informational messages.
-//   Responses without '#' are data lines intended for logging.
+// Stream (10 Hz when enabled):
+//   t_ms,force_g
 // ============================================================
 
 #include <Arduino.h>
@@ -73,8 +23,8 @@
 #include <EEPROM.h>
 
 // ---------------- Pins ----------------
-#define HX711_DT_PIN  2
-#define HX711_SCK_PIN 3
+#define HX711_DT_PIN  7
+#define HX711_SCK_PIN 6
 
 // ---------------- Config ----------------
 float HX711_SCALE = 1.0f;
