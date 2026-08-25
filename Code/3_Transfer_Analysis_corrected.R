@@ -58,7 +58,7 @@ cat(sprintf("Session-specific alpha values (%d session(s)):\n",
             nrow(calib_params)))
 print(calib_params %>%
         dplyr::select(experiment_date, alpha_before, alpha_after,
-                      alpha_session, sigma_alpha_combined, sigma_mechanical),
+                      alpha_session, u_alpha_session, sigma_mechanical),
       width = Inf)
 cat("\n")
 
@@ -337,64 +337,195 @@ cat("\n=== SUMMARY (mean ± SD, mean expanded U at k = 2) ===\n")
 print(summary_stats, width = Inf)
 write_csv(summary_stats, file.path(output_dir, "summary_corrected.csv"))
 
-# ---- 7. STATISTICAL ANALYSIS ------------------------------------------------
+# ---- 7. STATISTICAL ANALYSIS --------------------------------------------------
+cat("\n==============================\n")
+cat("STATISTICAL ANALYSIS\n")
+cat("==============================\n")
 
-cat("\n=== ASSUMPTION CHECKS ===\n")
+# Ensure factors are ordered as intended
+results <- results %>%
+  mutate(
+    weight_f = factor(weight_f, levels = c("200", "500", "800")),
+    speed_f  = factor(speed_f,  levels = c("1", "1.5", "2"))
+  )
 
-# Fit standard two-way ANOVA models for assumption testing
-aov_static  <- aov(mu_s ~ weight_f * speed_f, data = results)
-aov_dynamic <- aov(mu_d ~ weight_f * speed_f, data = results)
+# ------------------------------------------------------------------------------
+# 7.1 DESCRIPTIVE SUMMARIES
+# ------------------------------------------------------------------------------
 
-# Normality of residuals (Shapiro-Wilk)
-cat("\n--- Shapiro-Wilk: mu_s residuals ---\n")
-print(shapiro.test(residuals(aov_static)))
+cat("\n=== DESCRIPTIVE SUMMARIES ===\n")
 
-cat("\n--- Shapiro-Wilk: mu_d residuals ---\n")
-print(shapiro.test(residuals(aov_dynamic)))
+summary_mu_s_weight <- results %>%
+  group_by(weight_f) %>%
+  summarise(
+    n = n(),
+    mean_mu_s   = mean(mu_s, na.rm = TRUE),
+    sd_mu_s     = sd(mu_s, na.rm = TRUE),
+    median_mu_s = median(mu_s, na.rm = TRUE),
+    IQR_mu_s    = IQR(mu_s, na.rm = TRUE),
+    .groups = "drop"
+  )
 
-# Q-Q plots for visual inspection
-par(mfrow = c(1, 2))
-qqnorm(residuals(aov_static),  main = "Q-Q: mu_s residuals")
-qqline(residuals(aov_static))
-qqnorm(residuals(aov_dynamic), main = "Q-Q: mu_d residuals")
-qqline(residuals(aov_dynamic))
-par(mfrow = c(1, 1))
+summary_mu_s_speed <- results %>%
+  group_by(speed_f) %>%
+  summarise(
+    n = n(),
+    mean_mu_s   = mean(mu_s, na.rm = TRUE),
+    sd_mu_s     = sd(mu_s, na.rm = TRUE),
+    median_mu_s = median(mu_s, na.rm = TRUE),
+    IQR_mu_s    = IQR(mu_s, na.rm = TRUE),
+    .groups = "drop"
+  )
 
-# Homogeneity of variance (Levene's test)
-cat("\n--- Levene's test: mu_s ---\n")
-print(leveneTest(mu_s ~ weight_f * speed_f, data = results))
+summary_mu_d_weight <- results %>%
+  group_by(weight_f) %>%
+  summarise(
+    n = n(),
+    mean_mu_d   = mean(mu_d, na.rm = TRUE),
+    sd_mu_d     = sd(mu_d, na.rm = TRUE),
+    median_mu_d = median(mu_d, na.rm = TRUE),
+    IQR_mu_d    = IQR(mu_d, na.rm = TRUE),
+    .groups = "drop"
+  )
 
-cat("\n--- Levene's test: mu_d ---\n")
-print(leveneTest(mu_d ~ weight_f * speed_f, data = results))
+summary_mu_d_speed <- results %>%
+  group_by(speed_f) %>%
+  summarise(
+    n = n(),
+    mean_mu_d   = mean(mu_d, na.rm = TRUE),
+    sd_mu_d     = sd(mu_d, na.rm = TRUE),
+    median_mu_d = median(mu_d, na.rm = TRUE),
+    IQR_mu_d    = IQR(mu_d, na.rm = TRUE),
+    .groups = "drop"
+  )
 
-# ---- mu_s: standard two-way ANOVA -------------------------------------------
-# Used when normality and homogeneity assumptions are met (verify above).
+cat("\n--- mu_s by weight ---\n")
+print(summary_mu_s_weight)
 
-cat("\n=== TWO-WAY ANOVA: mu_s ~ weight * speed ===\n")
-print(summary(aov_static))
+cat("\n--- mu_s by speed ---\n")
+print(summary_mu_s_speed)
 
-cat("\n=== Tukey HSD: mu_s ===\n")
-print(TukeyHSD(aov_static))
+cat("\n--- mu_d by weight ---\n")
+print(summary_mu_d_weight)
 
-# ---- mu_d: ART ANOVA --------------------------------------------------------
-# Used because normality and/or homogeneity are violated for mu_d.
-# ART (Aligned Rank Transform) is the non-parametric equivalent of a
-# two-way ANOVA and correctly handles factorial designs with interactions.
-# Reference: Kay & Wobbrock (2016), ARTool R package.
+cat("\n--- mu_d by speed ---\n")
+print(summary_mu_d_speed)
 
-cat("\n=== ART ANOVA: mu_d ~ weight * speed ===\n")
-art_dynamic <- art(mu_d ~ weight_f * speed_f, data = results)
-print(anova(art_dynamic))
+# ------------------------------------------------------------------------------
+# 7.2 KRUSKAL-WALLIS TESTS
+# ------------------------------------------------------------------------------
 
-cat("\n=== ART post-hoc: mu_d ~ weight_f ===\n")
-print(contrast(emmeans(artlm(art_dynamic, "weight_f"), ~ weight_f),
-               method = "pairwise", adjust = "tukey"))
+cat("\n=== KRUSKAL-WALLIS: mu_s by weight ===\n")
+kw_mu_s_weight <- kruskal.test(mu_s ~ weight_f, data = results)
+print(kw_mu_s_weight)
 
-cat("\n=== ART post-hoc: mu_d ~ speed_f ===\n")
-print(contrast(emmeans(artlm(art_dynamic, "speed_f"), ~ speed_f),
-               method = "pairwise", adjust = "tukey"))
+cat("\n=== KRUSKAL-WALLIS: mu_s by speed ===\n")
+kw_mu_s_speed <- kruskal.test(mu_s ~ speed_f, data = results)
+print(kw_mu_s_speed)
 
-# ---- 7. FIGURES -------------------------------------------------------------
+cat("\n=== KRUSKAL-WALLIS: mu_d by weight ===\n")
+kw_mu_d_weight <- kruskal.test(mu_d ~ weight_f, data = results)
+print(kw_mu_d_weight)
+
+cat("\n=== KRUSKAL-WALLIS: mu_d by speed ===\n")
+kw_mu_d_speed <- kruskal.test(mu_d ~ speed_f, data = results)
+print(kw_mu_d_speed)
+
+# ------------------------------------------------------------------------------
+# 7.3 DUNN POST-HOC TESTS (ONLY IF OMNIBUS TEST IS SIGNIFICANT)
+# ------------------------------------------------------------------------------
+
+cat("\n=== DUNN POST-HOC TESTS (Holm adjustment) ===\n")
+
+dunn_mu_s_weight <- NULL
+dunn_mu_s_speed  <- NULL
+dunn_mu_d_weight <- NULL
+dunn_mu_d_speed  <- NULL
+
+if (kw_mu_s_weight$p.value < 0.05) {
+  cat("\n--- mu_s by weight ---\n")
+  dunn_mu_s_weight <- dunnTest(mu_s ~ weight_f, data = results, method = "holm")
+  print(dunn_mu_s_weight)
+} else {
+  cat("\n--- mu_s by weight: omnibus test not significant, no post-hoc performed ---\n")
+}
+
+if (kw_mu_s_speed$p.value < 0.05) {
+  cat("\n--- mu_s by speed ---\n")
+  dunn_mu_s_speed <- dunnTest(mu_s ~ speed_f, data = results, method = "holm")
+  print(dunn_mu_s_speed)
+} else {
+  cat("\n--- mu_s by speed: omnibus test not significant, no post-hoc performed ---\n")
+}
+
+if (kw_mu_d_weight$p.value < 0.05) {
+  cat("\n--- mu_d by weight ---\n")
+  dunn_mu_d_weight <- dunnTest(mu_d ~ weight_f, data = results, method = "holm")
+  print(dunn_mu_d_weight)
+} else {
+  cat("\n--- mu_d by weight: omnibus test not significant, no post-hoc performed ---\n")
+}
+
+if (kw_mu_d_speed$p.value < 0.05) {
+  cat("\n--- mu_d by speed ---\n")
+  dunn_mu_d_speed <- dunnTest(mu_d ~ speed_f, data = results, method = "holm")
+  print(dunn_mu_d_speed)
+} else {
+  cat("\n--- mu_d by speed: omnibus test not significant, no post-hoc performed ---\n")
+}
+
+# ------------------------------------------------------------------------------
+# 7.4 SAVE TABLES
+# ------------------------------------------------------------------------------
+
+kw_table <- data.frame(
+  response = c("mu_s", "mu_s", "mu_d", "mu_d"),
+  factor   = c("weight", "speed", "weight", "speed"),
+  chi_sq   = c(
+    unname(kw_mu_s_weight$statistic),
+    unname(kw_mu_s_speed$statistic),
+    unname(kw_mu_d_weight$statistic),
+    unname(kw_mu_d_speed$statistic)
+  ),
+  df = c(
+    unname(kw_mu_s_weight$parameter),
+    unname(kw_mu_s_speed$parameter),
+    unname(kw_mu_d_weight$parameter),
+    unname(kw_mu_d_speed$parameter)
+  ),
+  p_value = c(
+    kw_mu_s_weight$p.value,
+    kw_mu_s_speed$p.value,
+    kw_mu_d_weight$p.value,
+    kw_mu_d_speed$p.value
+  )
+)
+
+cat("\n=== KRUSKAL-WALLIS SUMMARY TABLE ===\n")
+print(kw_table)
+
+# Convert Dunn outputs to data frames if they exist
+dunn_mu_s_weight_table <- if (!is.null(dunn_mu_s_weight)) dunn_mu_s_weight$res else NULL
+dunn_mu_s_speed_table  <- if (!is.null(dunn_mu_s_speed))  dunn_mu_s_speed$res  else NULL
+dunn_mu_d_weight_table <- if (!is.null(dunn_mu_d_weight)) dunn_mu_d_weight$res else NULL
+dunn_mu_d_speed_table  <- if (!is.null(dunn_mu_d_speed))  dunn_mu_d_speed$res  else NULL
+
+# Uncomment if needed
+# write.csv(summary_mu_s_weight, "summary_mu_s_weight.csv", row.names = FALSE)
+# write.csv(summary_mu_s_speed,  "summary_mu_s_speed.csv",  row.names = FALSE)
+# write.csv(summary_mu_d_weight, "summary_mu_d_weight.csv", row.names = FALSE)
+# write.csv(summary_mu_d_speed,  "summary_mu_d_speed.csv",  row.names = FALSE)
+# write.csv(kw_table,            "kruskal_wallis_summary.csv", row.names = FALSE)
+# if (!is.null(dunn_mu_s_weight_table)) write.csv(dunn_mu_s_weight_table, "dunn_mu_s_weight.csv", row.names = FALSE)
+# if (!is.null(dunn_mu_s_speed_table))  write.csv(dunn_mu_s_speed_table,  "dunn_mu_s_speed.csv",  row.names = FALSE)
+# if (!is.null(dunn_mu_d_weight_table)) write.csv(dunn_mu_d_weight_table, "dunn_mu_d_weight.csv", row.names = FALSE)
+# if (!is.null(dunn_mu_d_speed_table))  write.csv(dunn_mu_d_speed_table,  "dunn_mu_d_speed.csv",  row.names = FALSE)
+
+cat("\n==============================\n")
+cat("END OF STATISTICAL ANALYSIS\n")
+cat("==============================\n")
+
+# ---- 8. FIGURES -------------------------------------------------------------
 
 # Shared y-axis range
 mu_range   <- range(c(results$mu_s, results$mu_d), na.rm = TRUE)
@@ -412,10 +543,9 @@ p_static <- ggplot(results, aes(x = weight_f, y = mu_s, fill = speed_f)) +
        fill   = "Speed (cm/s)",
        colour = "Speed (cm/s)") +
   coord_cartesian(ylim = mu_ylim) +
-  theme_bw(base_size = 14) +
-  scale_fill_brewer(palette   = "Set2") +
+  theme_bw(base_size = 16) +
+  scale_fill_brewer(palette = "Set2") +
   scale_colour_brewer(palette = "Set2")
-p_static
 
 # -- Boxplot: mu_d by weight and speed ----------------------------------------
 p_dynamic <- ggplot(results, aes(x = weight_f, y = mu_d, fill = speed_f)) +
@@ -423,24 +553,33 @@ p_dynamic <- ggplot(results, aes(x = weight_f, y = mu_d, fill = speed_f)) +
   geom_jitter(aes(colour = speed_f),
               position = position_jitterdodge(jitter.width = 0.15),
               size = 1.5, alpha = 0.6) +
-  labs(x      = "Weight (g)",
-       y      = expression(mu[d] ~ ""),
+  labs(x = "Weight (g)",
+       y = expression(mu[d] ~ ""),
        fill   = "Speed (cm/s)",
        colour = "Speed (cm/s)") +
   coord_cartesian(ylim = mu_ylim) +
-  theme_bw(base_size = 14) +
-  scale_fill_brewer(palette   = "Set2") +
+  theme_bw(base_size = 16) +
+  scale_fill_brewer(palette = "Set2") +
   scale_colour_brewer(palette = "Set2")
-p_dynamic
 
 # -- Combined figure (paper) --------------------------------------------------
-p_combined <- (p_static + theme(legend.position = "none")) /
-  (p_dynamic + theme(legend.position = "bottom")) +
-  plot_layout(nrow = 2)
+p_combined_pending <- ggarrange(p_static + labs(x = NULL), 
+                                p_dynamic + labs(x = NULL),
+                                common.legend = TRUE,
+                                legend        = "right",
+                                ncol          = 1, nrow = 2,
+                                align         = "hv") +
+  theme(legend.key.size  = unit(0.4, "cm"),
+        legend.text       = element_text(size = 10),
+        legend.title      = element_text(size = 10))
+
+p_combined <- annotate_figure(p_combined_pending,
+                              bottom = textGrob("Weight (g)",
+                                                gp = gpar(cex = 1.35)))
 p_combined
 
 ggsave(file.path(output_dir, "boxplot_mu_combined.png"),
-       p_combined, width = 8, height = 10, dpi = 300)
+       p_combined, width = 7, height = 8, dpi = 600)
 
 # -- Scatter: mu_s vs mu_d ----------------------------------------------------
 p_scatter <- ggplot(results, aes(x = mu_d, y = mu_s,
@@ -461,3 +600,4 @@ ggsave(file.path(output_dir, "scatter_static_vs_dynamic.png"),
 
 cat("\n=== 03_Analysis.R complete ===\n")
 cat("All outputs saved to:", output_dir, "\n")
+

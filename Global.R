@@ -95,10 +95,12 @@ library(patchwork)
 library(cowplot)
 library(grid)
 library(car)
+library(FSA)
 library(multcomp)
 library(ARTool)
 library(emmeans)
 library(ggrepel)
+library(ggpubr)
 
 # ---- Output directory -------------------------------------------------------
 Results.dir <- "Results/"
@@ -107,7 +109,7 @@ dir.create(Results.dir, showWarnings = FALSE, recursive = TRUE)
 # ---- Run Pipeline B (friction data analysis) --------------------------------
 # To run Pipeline A instead, source 01_LoadCell_Characterisation.R directly.
 
-source("Code/1_Loadcell_characterisation.R")
-source("Code/1_Calibration_check.R")
-source("Code/2_Friction_extraction.R")
-source("Code/3_analysis.R")
+source("Code/1A_Loadcell_characterisation_SI.R")
+source("Code/1B_Session_Calibration_for_Transfer.R")
+source("Code/2_Friction_extraction_Raw.R")
+source("Code/3_Transfer_Analysis_corrected.R")

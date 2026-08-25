@@ -33,8 +33,9 @@
 #     6. The fit-derived uncertainty on alpha_session is obtained from the
 #        before/after alpha uncertainties.
 #     7. sigma_alpha_combined = sqrt(u_alpha_mean^2 + sigma_within^2)
-#     8. Quantify within-session stability as:
-#            sigma_within = abs(alpha_after - alpha_before) / 2
+#     8. Quantify within-session stability by treating the observed before/after
+#        alpha interval as a continuous rectangular (uniform) distribution:
+#            sigma_within = abs(alpha_after - alpha_before) / sqrt(12)
 #     9. Combine fit uncertainty and within-session stability in quadrature:
 #            sigma_alpha_combined = sqrt(u_alpha_mean^2 + sigma_within^2)
 #
@@ -282,7 +283,9 @@ calib_params_list <- map_dfr(experiment_dates, function(d) {
   alpha_session <- mean(c(chi2_before$alpha, chi2_after$alpha))
   
   # Stability term across the session
-  sigma_within <- abs(chi2_after$alpha - chi2_before$alpha) / 2
+  # Standard uncertainty for a continuous rectangular (uniform) distribution
+  # spanning the observed before/after alpha interval.
+  sigma_within <- abs(chi2_after$alpha - chi2_before$alpha) / sqrt(12)
   
   # Standard uncertainty on the mean alpha from before/after chi-squared fits
   u_alpha_mean <- sqrt(
@@ -361,3 +364,48 @@ write_csv(calib_check_summary,
 cat("\n=== 01_Calibration_Check.R complete ===\n")
 cat(sprintf("calibration_parameters.csv written with %d session(s).\n",
             nrow(calib_params_list)))
+
+# create a more readable table for the calibration parameters outputs
+parameter_descriptions <- tribble(
+  ~parameter,               ~description,
+  "alpha_before",           "Best-fitting calibration correction factor obtained before the friction experiments.",
+  "alpha_after",            "Best-fitting calibration correction factor obtained after the friction experiments.",
+  "chi2_min_before",        "Minimum chi-squared value obtained for the before-session calibration fit.",
+  "chi2_min_after",         "Minimum chi-squared value obtained for the after-session calibration fit.",
+  "chi2_red_min_before",    "Minimum reduced chi-squared for the before-session fit; values near 1 indicate agreement with the stated uncertainties.",
+  "chi2_red_min_after",     "Minimum reduced chi-squared for the after-session fit; values near 1 indicate agreement with the stated uncertainties.",
+  "chi2_threshold_before",  "Chi-squared threshold used to determine the uncertainty interval around alpha_before (chi2_min + 1).",
+  "chi2_threshold_after",   "Chi-squared threshold used to determine the uncertainty interval around alpha_after (chi2_min + 1).",
+  "alpha_lower_before",     "Lower bound of the uncertainty interval for alpha_before.",
+  "alpha_upper_before",     "Upper bound of the uncertainty interval for alpha_before.",
+  "alpha_lower_after",      "Lower bound of the uncertainty interval for alpha_after.",
+  "alpha_upper_after",      "Upper bound of the uncertainty interval for alpha_after.",
+  "u_alpha_before",         "Fit-derived standard uncertainty associated with alpha_before.",
+  "u_alpha_after",          "Fit-derived standard uncertainty associated with alpha_after.",
+  "alpha_session",          "Session-specific correction factor, calculated as the mean of alpha_before and alpha_after.",
+  "sigma_within",           "Standard uncertainty associated with slow within-session drift, assuming continuous uniform variation between alpha_before and alpha_after.",
+  "u_alpha_mean",           "Standard uncertainty of the mean calibration factor, propagated from u_alpha_before and u_alpha_after.",
+  "u_alpha_session",        "Combined standard uncertainty of alpha_session, combining u_alpha_mean and sigma_within in quadrature.",
+  "sigma_mechanical",       "Additional mechanical or instrumental force uncertainty required to obtain a reduced chi-squared close to 1.",
+  "u_balance",              "Standard uncertainty of the reference balance derived from its resolution."
+)
+
+calib_params_readable <- calib_params_list %>%
+  pivot_longer(
+    cols = -experiment_date,
+    names_to = "parameter",
+    values_to = "value"
+  ) %>%
+  left_join(parameter_descriptions, by = "parameter") %>%
+  dplyr::select(parameter, description, experiment_date, value) %>%
+  pivot_wider(
+    names_from = experiment_date,
+    values_from = value
+  ) %>%
+  arrange(match(parameter, parameter_descriptions$parameter))
+
+write_csv(
+  calib_params_readable,
+  file.path(output_dir, "Session_calibration_parameters_readable.csv")
+)
+
