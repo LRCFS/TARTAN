@@ -1,8 +1,8 @@
 # =============================================================================
-# 02_Friction_Extraction.R — Raw Friction Extraction & Diagnostic Plots
+# 2_Friction_extraction_Raw.R — Raw Friction Extraction & Diagnostic Plots
 # =============================================================================
 #
-# PIPELINE B — Step 2 of 3. Must be run after 01_Calibration_Check.R.
+# PIPELINE B — Step 2 of 3. Must be run after 1B_Session_Calibration_for_Transfer.R.
 #
 # Purpose:
 #   Extracts raw static and dynamic friction forces from all TARTAN experiment
@@ -20,7 +20,7 @@
 #   All quantities extracted in this script are based on the raw force_g
 #   values. No session-specific alpha correction is applied here.
 #   The definitive corrected forces, corrected friction coefficients, and
-#   publication-ready figures are generated later in 03_Analysis.R.
+#   publication-ready figures are generated later in 3_Transfer_Analysis_corrected.R.
 #
 # Input files (in data_dir = Data/COF/):
 #   YYYYMMDD_HHMMSS_[weight]g_Rep[n]_run[speed].csv
@@ -29,14 +29,13 @@
 #   Calibration check files (before/after) in the same folder are automatically
 #   excluded from processing by filename pattern.
 #
-# Outputs (in output_dir = Results/):
-#   all_results.csv              — raw extracted friction forces and preliminary
-#                                  friction coefficients (diagnostic only;
-#                                  no alpha correction)
-#   example_force_curves.png     — raw overview force curves (diagnostic/QC)
-#   example_force_curve.png      — raw single example force curve (diagnostic/QC)
-#   Results/force_curves/        — raw replicate-level force-curve figures
-#                                  for diagnostic inspection
+# Outputs (in output_dir = Results/Session-Specific_Calibration_Check/):
+#   all_results_uncorrected.csv         — raw extracted friction forces and
+#                                         preliminary friction coefficients
+#                                         (diagnostic only; no alpha correction)
+#   example_force_curve_uncorrected.png — raw single example force curve (QC)
+#   force_curves_uncorrected/           — raw replicate-level force-curve
+#                                         figures for diagnostic inspection
 #
 # =============================================================================
 
@@ -49,7 +48,7 @@ dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 # Actual measured masses of the transfer weights (precision balance)
 # Used here only to compute preliminary raw mu values for diagnostics/QC.
 # Definitive corrected forces and friction coefficients are computed later
-# in 03_Analysis.R after application of alpha_session.
+# in 3_Transfer_Analysis_corrected.R after application of alpha_session.
 M_transfer <- c("200" = 200.00, "500" = 498.85, "800" = 799.37)
 
 # ---- 1. HELPERS -------------------------------------------------------------
@@ -132,7 +131,7 @@ results <- map_dfr(csv_files, function(fp) {
   bind_cols(meta, friction)
 })
 
-# Preliminary uncorrected mu (for diagnostics — alpha correction in Script 03)
+# Preliminary uncorrected mu (for diagnostics — alpha correction in Script 3)
 results <- results %>%
   mutate(
     M_actual         = M_transfer[as.character(weight_g)],
@@ -227,7 +226,7 @@ example_row <- results %>%
 p_example <- plot_one_rep(example_row$filename, y_max) +
   labs(title = paste0(example_row$weight_g, " g, ",
                       example_row$speed_cm_s, " cm/s"),
-       x = "Sample number", y = "Friction force (g)") +
+       x = "Sample number", y = "Friction force (g)") +   # x is row_number(), not seconds
   theme(plot.title = element_text(size = 11, hjust = 0.5, face = "plain"),
         axis.title = element_text(size = 10))
 
@@ -261,6 +260,6 @@ for (i in seq_len(nrow(conditions))) {
          combined, width = 8, height = 12, dpi = 600)
 }
 
-cat(sprintf("\n=== 02_Friction_Extraction.R complete ===\n"))
-cat(sprintf("all_results.csv written with %d rows.\n", nrow(results)))
+cat(sprintf("\n=== 2_Friction_extraction_Raw.R complete ===\n"))
+cat(sprintf("all_results_uncorrected.csv written with %d rows.\n", nrow(results)))
 cat(sprintf("Force curve figures saved to %s\n", force_curves_dir))

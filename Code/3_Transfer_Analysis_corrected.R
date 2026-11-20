@@ -1,19 +1,20 @@
 # =============================================================================
-# 03_Analysis.R — Correction, Uncertainty Propagation, Statistics & Publication Figures
+# 3_Transfer_Analysis_corrected.R — Correction, Uncertainty Propagation, Statistics & Publication Figures
 # =============================================================================
 #
-# PIPELINE B — Step 3 of 3. Must be run after 01_Calibration_Check.R and
-# 02_Friction_Extraction.R.
+# PIPELINE B — Step 3 of 3. Must be run after 1B_Session_Calibration_for_Transfer.R
+# and 2_Friction_extraction_Raw.R.
 #
 # Purpose:
 #   Applies the session-specific calibration correction (alpha_session)
-#   computed by 01_Calibration_Check.R to the raw friction force readings
-#   extracted in 02_Friction_Extraction.R. Propagates measurement
+#   computed by 1B_Session_Calibration_for_Transfer.R to the raw friction force
+#   readings extracted in 2_Friction_extraction_Raw.R. Propagates measurement
 #   uncertainties following the GUM framework (k = 2 for expanded uncertainty),
 #   runs the statistical analyses, and produces publication-ready figures.
 #
 # Calibration correction:
 #   Each friction run is matched to its session alpha by experiment date.
+#   (Session_calibration_parameters.csv, produced by Script 1B.)
 #   The alpha applied to a given run is the mean of the before and after
 #   load-cell checks conducted on the same day as that run:
 #     F_corrected = F_raw × alpha_session
@@ -23,23 +24,26 @@
 #   experiment rather than derived from a separate characterisation study.
 #
 # Statistical approach:
-#   - Normality tested via Shapiro-Wilk on model residuals.
-#   - Homogeneity of variance tested via Levene's test.
-#   - mu_s: standard two-way ANOVA (assumptions verified).
-#   - mu_d: Aligned Rank Transform (ART) ANOVA (normality and homogeneity
-#     violated; ART is the non-parametric equivalent for factorial designs).
-#   - Post-hoc: Tukey HSD (standard ANOVA) / ART + emmeans (ART ANOVA).
+#   - mu_s and mu_d are analysed separately, and the effects of applied mass
+#     and transfer speed are assessed independently (one-factor comparisons).
+#   - Group differences are tested with Kruskal-Wallis rank-sum tests.
+#   - Where the omnibus test is significant (p < 0.05), Dunn's post-hoc
+#     pairwise comparisons are performed with Holm adjustment for multiple
+#     testing (FSA::dunnTest, method = "holm").
+#   - Descriptive statistics (n, mean, SD, median, IQR) are reported per group.
 #
-# Inputs (from Results/):
-#   calibration_parameters.csv   — session-specific alpha from Script 01
-#   all_results.csv              — raw extracted friction results from Script 02
+# Inputs (from Results/Session-Specific_Calibration_Check/):
+#   Session_calibration_parameters.csv — session-specific alpha from Script 1B
+#   all_results_uncorrected.csv        — raw extracted friction results from Script 2
+#   Raw experiment files are also re-read from Data/COF/ for the force-curve figures.
 #
-# Outputs (in Results/):
-#   all_results_corrected.csv        — corrected friction coefficients + uncertainties
-#   summary_corrected.csv            — mean ± SD per condition
-#   example_force_curve_corrected.png — corrected example force curve (paper figure)
-#   boxplot_mu_combined.png          — combined mu_s / mu_d boxplot (paper figure)
-#   scatter_static_vs_dynamic.png    — mu_s vs mu_d scatter plot
+# Outputs (in Results/Session-Specific_Calibration_Check/):
+#   all_results_corrected.csv          — corrected friction coefficients + uncertainties
+#   summary_corrected.csv              — mean ± SD per condition
+#   example_force_curve_corrected.png  — corrected example force curve (paper figure)
+#   force_curves_corrected/            — corrected force curves, one figure per condition
+#   boxplot_mu_combined.png            — combined mu_s / mu_d boxplot (paper figure)
+#   scatter_static_vs_dynamic.png      — mu_s vs mu_d scatter plot (paper figure)
 #
 # =============================================================================
 
@@ -47,11 +51,13 @@
 
 output_dir <- "Results/Session-Specific_Calibration_Check/"
 
-# ---- 1. LOAD CALIBRATION PARAMETERS ----------------------------------------
+# ---- 1. LOAD CALIBRATION PARAMETERS (from Script 1B) ------------------------
 
 cat("=== LOADING CALIBRATION PARAMETERS ===\n\n")
 
+# Dates are read as character on both sides so the join cannot fail on type
 calib_params <- read_csv(file.path(output_dir, "Session_calibration_parameters.csv"),
+                         col_types = cols(experiment_date = col_character()),
                          show_col_types = FALSE)
 
 cat(sprintf("Session-specific alpha values (%d session(s)):\n",
@@ -65,13 +71,13 @@ cat("\n")
 # ---- 2. LOAD FRICTION RESULTS -----------------------------------------------
 
 results_raw <- read_csv(file.path(output_dir, "all_results_uncorrected.csv"),
+                        col_types = cols(date_str = col_character()),
                         show_col_types = FALSE)
 cat(sprintf("Loaded %d friction results.\n\n", nrow(results_raw)))
 
 # ---- 3. JOIN SESSION ALPHA BY EXPERIMENT DATE -------------------------------
 # Each run is matched to the calibration session conducted on the same date.
-# If a run date has no matching calibration parameters, it will produce NA
-# and a warning is issued.
+# If a run date has no matching calibration parameters, the script stops.
 
 results <- results_raw %>%
   left_join(calib_params %>%
@@ -86,7 +92,8 @@ results <- results_raw %>%
 
 unmatched <- results %>% filter(is.na(alpha_session))
 if (nrow(unmatched) > 0) {
-  warning(sprintf(
+  # Stop: an unmatched run would silently become NA and drop out of the stats
+  stop(sprintf(
     "%d run(s) could not be matched to a calibration session:\n%s\n",
     nrow(unmatched),
     paste(unique(unmatched$date_str), collapse = ", ")))
@@ -173,12 +180,12 @@ print(results %>%
 write_csv(results, file.path(output_dir, "all_results_corrected.csv"))
 
 # ---- 5. CORRECTED FORCE-CURVE FIGURES (paper-ready) -------------------------
-# Unlike the diagnostic plots created in 02_Friction_Extraction.R, the force
+# Unlike the diagnostic plots created in 2_Friction_extraction_Raw.R, the force
 # curves plotted here are corrected using the session-specific alpha_session.
 # The annotated Fstat and Fdyn values therefore correspond to the corrected
 # forces reported in the final analysis.
 
-# Use the same raw data directory as in 02_Friction_Extraction.R
+# Use the same raw data directory as in 2_Friction_extraction_Raw.R
 data_dir <- "Data/COF/"
 
 # Global corrected y-axis maximum across all files
@@ -598,6 +605,5 @@ p_scatter
 ggsave(file.path(output_dir, "scatter_static_vs_dynamic.png"),
        p_scatter, width = 7, height = 6, dpi = 600)
 
-cat("\n=== 03_Analysis.R complete ===\n")
+cat("\n=== 3_Transfer_Analysis_corrected.R complete ===\n")
 cat("All outputs saved to:", output_dir, "\n")
-

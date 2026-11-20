@@ -1,54 +1,48 @@
 # =============================================================================
-# 01_Calibration_Check.R — Session-Specific Calibration Check
+# 1B_Session_Calibration_for_Transfer.R — Session-Specific Calibration Check
 # =============================================================================
 #
-# PIPELINE B — Step 1 of 3. Must be run before 02_Friction_Extraction.R.
+# PIPELINE B — Step 1 of 3. Run before 2_Friction_extraction_Raw.R and
+# 3_Transfer_Analysis_corrected.R.
+#
+# NOTE: this file was REBUILT because the previous copy had been overwritten
+# with an old version of 1A_Loadcell_characterisation_SI.R. The chi-squared
+# functions are copied verbatim from 1A (the 1A header states they are
+# identical). The before/after AVERAGING and the u_alpha_session formula below
+# are a reconstruction — check them against the Methods section of the paper.
 #
 # Purpose:
-#   Computes a session-specific calibration correction factor (alpha_session)
-#   for each experiment date using the before/after load-cell checks that
-#   bracket the friction runs collected on that date.
+#   For every experiment day, the load cell was checked with known masses
+#   BEFORE and AFTER the friction runs. Each check is fitted independently
+#   with the chi-squared criterion (Galais 2024, Appendix 4) to obtain
+#   alpha_before and alpha_after. The correction applied to that day's
+#   friction runs is their mean:
+#     alpha_session = (alpha_before + alpha_after) / 2
 #
-#   The workflow is:
-#     calibration check (before) -> friction experiments -> calibration check (after)
+# Uncertainty on alpha_session (standard uncertainties):
+#   (i)  fit-derived : u_fit  = sqrt(u_alpha_before^2 + u_alpha_after^2) / 2
+#                      (uncertainty of the mean of two independent estimates)
+#   (ii) stability   : u_stab = |alpha_after - alpha_before| / (2 * sqrt(3))
+#                      (drift within the session treated as a rectangular
+#                       distribution spanning the before/after interval)
+#   u_alpha_session  = sqrt(u_fit^2 + u_stab^2)
 #
-#   This script provides the calibration parameters used later in
-#   03_Analysis.R to correct the extracted friction forces.
+#   sigma_mechanical for the session is the root-mean-square of the before
+#   and after values.
 #
-# Method:
-#   For each experimental date:
-#     1. Read the before and after calibration-check files.
-#     2. Remove zero-value hardware artefacts (force_g == 0).
-#     3. Use tare rows (target_g == 0) only as a diagnostic of zero-load
-#        stability; they are excluded from the calibration fit.
-#     4. For each timing (before / after), summarise the repeated readings at
-#        each non-zero target mass by their mean force and standard error.
-#     5. Estimate alpha by minimising the reduced chi-squared criterion:
-#            chi2 = (1/(n-1)) * sum((M - alpha*X)^2 /
-#                    (U_M^2 + (alpha*u_X)^2 + sigma_mechanical^2))
-#        where M is the known reference mass, X the mean measured force,
-#        u_X the standard error of the mean force, U_M the balance uncertainty,
-#        and sigma_mechanical an additional uncertainty term if needed to bring
-#        reduced chi-squared close to 1.
-#     6. The fit-derived uncertainty on alpha_session is obtained from the
-#        before/after alpha uncertainties.
-#     7. sigma_alpha_combined = sqrt(u_alpha_mean^2 + sigma_within^2)
-#     8. Quantify within-session stability by treating the observed before/after
-#        alpha interval as a continuous rectangular (uniform) distribution:
-#            sigma_within = abs(alpha_after - alpha_before) / sqrt(12)
-#     9. Combine fit uncertainty and within-session stability in quadrature:
-#            sigma_alpha_combined = sqrt(u_alpha_mean^2 + sigma_within^2)
+# Input files (in data_dir = Data/COF/):
+#   YYYYMMDD_..._CalibrationRaw_LoadCell_before.csv
+#   YYYYMMDD_..._CalibrationRaw_LoadCell_after.csv
+#   Expected columns (same format as the calibration-curve files in 1A):
+#     date, label, weight_index, target_g, sample_index, force_g
+#   Only target_g and force_g are required.
 #
-# Notes:
-#   - This script is distinct from 01_LoadCell_Characterisation.R.
-#   - The characterisation script describes overall load-cell performance for
-#     the paper; the present script produces the session-specific correction
-#     actually used in the friction analysis.
+# Outputs (in output_dir = Results/Session-Specific_Calibration_Check/):
+#   Calibration_check_fits.csv            — one row per check (before / after)
+#   Session_calibration_parameters.csv    — one row per experiment date
+#                                            (read by Script 3)
+#   calibration_check_alpha_by_session.png
 #
-# Output:
-#   calibration_parameters.csv    one row per experiment date
-#   calibration_check_summary.csv per-weight summary for diagnostics
-#   calibration_check_tare.csv    tare stability diagnostics
 # =============================================================================
 
 # ---- CONFIGURATION ----------------------------------------------------------
@@ -58,111 +52,17 @@ output_dir <- "Results/Session-Specific_Calibration_Check/"
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
 balance_resolution <- 0.01  # grams — resolution of the reference balance
-u_balance <- balance_resolution / sqrt(12)
+U_balance <- balance_resolution / sqrt(12)
 
-# ---- 1. LOAD BEFORE AND AFTER FILES -----------------------------------------
+# Mass used to set the firmware scale factor and tare rows are excluded,
+# exactly as in 1A (they cannot independently check the converted response).
+scale_factor_mass <- 899.45
 
-before_files <- list.files(data_dir,
-                           pattern = "CalibrationRaw_LoadCell_before\\.csv$",
-                           full.names = TRUE)
-after_files  <- list.files(data_dir,
-                           pattern = "CalibrationRaw_LoadCell_after\\.csv$",
-                           full.names = TRUE)
+# ---- 1. CHI-SQUARED FUNCTIONS (identical to 1A) -----------------------------
 
-cat(sprintf("Found %d before files and %d after files.\n\n",
-            length(before_files), length(after_files)))
-
-if (length(before_files) == 0 || length(after_files) == 0) {
-  stop("No before/after calibration check files found in ", data_dir,
-       "\nExpected filenames: YYYYMMDD_CalibrationRaw_LoadCell_before.csv\n",
-       "                     YYYYMMDD_CalibrationRaw_LoadCell_after.csv")
-}
-
-read_check_file <- function(fp, timing_label) {
-  date_str <- substr(basename(fp), 1, 8)
-  read_csv(fp, show_col_types = FALSE) %>%
-    mutate(
-      experiment_date = date_str,
-      timing          = timing_label
-    )
-}
-
-calib_checks <- bind_rows(
-  map_dfr(before_files, read_check_file, timing_label = "before"),
-  map_dfr(after_files,  read_check_file, timing_label = "after")
-)
-
-# ---- 2. ZERO REMOVAL --------------------------------------------------------
-# Removes hardware artefacts (force_g == 0) from HX711 not-ready events.
-# Must happen before any summarisation.
-# This is SEPARATE from the tare rows (target_g == 0) which are legitimate.
-
-zeros_removed <- calib_checks %>% filter(force_g == 0)
-
-cat("=== Zero removal report ===\n")
-cat(sprintf("Total measurements loaded: %d\n", nrow(calib_checks)))
-cat(sprintf("Zero readings found:       %d\n", nrow(zeros_removed)))
-
-if (nrow(zeros_removed) > 0) {
-  cat("\nDetail of removed zero readings:\n")
-  print(zeros_removed %>%
-          dplyr::select(experiment_date, timing, target_g, sample_index, force_g),
-        n = Inf, width = Inf)
-} else {
-  cat("No zero readings detected.\n")
-}
-
-calib_checks <- calib_checks %>% filter(force_g != 0)
-cat(sprintf("Measurements retained: %d\n\n", nrow(calib_checks)))
-
-# ---- 3. TARE STABILITY CHECK ------------------------------------------------
-# Rows where target_g == 0 are the tare verification measurements.
-# These are reported here as a diagnostic but excluded from chi-squared.
-# A large tare drift indicates the zero-point shifted during the session,
-# which is normal (thermal drift, creep) and handled by the Arduino tare.
-
-tare_data <- calib_checks %>% filter(target_g == 0)
-
-tare_summary <- tare_data %>%
-  group_by(experiment_date, timing) %>%
-  summarise(
-    n          = n(),
-    mean_zero  = mean(force_g, na.rm = TRUE),
-    sd_zero    = sd(force_g,   na.rm = TRUE),
-    .groups    = "drop"
-  )
-
-tare_drift <- tare_summary %>%
-  dplyr::select(experiment_date, timing, mean_zero) %>%
-  pivot_wider(names_from = timing, values_from = mean_zero) %>%
-  mutate(tare_drift_g = after - before)
-
-cat("=== Tare stability check (target_g == 0) ===\n")
-cat("(Informational only — tare rows excluded from alpha computation)\n\n")
-
-for (d in unique(tare_drift$experiment_date)) {
-  row_b <- tare_summary %>% filter(experiment_date == d, timing == "before")
-  row_a <- tare_summary %>% filter(experiment_date == d, timing == "after")
-  drift <- tare_drift %>% filter(experiment_date == d)
-  cat(sprintf("Session %s:\n", d))
-  if (nrow(row_b) > 0)
-    cat(sprintf("  Before — mean: %+.3f g, SD: %.3f g\n",
-                row_b$mean_zero, row_b$sd_zero))
-  if (nrow(row_a) > 0)
-    cat(sprintf("  After  — mean: %+.3f g, SD: %.3f g\n",
-                row_a$mean_zero, row_a$sd_zero))
-  if (nrow(drift) > 0 && !is.na(drift$tare_drift_g))
-    cat(sprintf("  Tare drift over session: %+.3f g\n\n", drift$tare_drift_g))
-}
-
-write_csv(tare_summary, file.path(output_dir, "Session_check_tare.csv"))
-
-# ---- 4. CHI-SQUARED FUNCTIONS -----------------------------------------------
-# Identical to those in 01_LoadCell_Characterisation.R.
-
-compute_chi2 <- function(alpha, sigma_mech, M, X, sigma_X, u_M) {
+compute_chi2 <- function(alpha, sigma_mech, M, X, sigma_X, U_M) {
   residuals_sq <- (M - alpha * X)^2
-  denominators <- u_M^2 + (sigma_X * alpha)^2 + sigma_mech^2
+  denominators <- U_M^2 + (sigma_X * alpha)^2 + sigma_mech^2
   sum(residuals_sq / denominators)
 }
 
@@ -172,32 +72,37 @@ compute_chi2_red <- function(chi2, n) {
 
 find_optimal_alpha <- function(sigma_mech, M, X, sigma_X, U_M) {
   result <- optimise(
-    f        = function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, U_M),
-    interval = c(0.95, 1.05))
+    f = function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, U_M),
+    interval = c(0.95, 1.05),
+    tol      = 1e-12
+  )
   list(alpha = result$minimum, chi2 = result$objective)
 }
 
-find_sigma_mechanical <- function(M, X, sigma_X, u_M) {
-  n <- length(M)
-  opt0 <- find_optimal_alpha(0, M, X, sigma_X, u_M)
+find_sigma_mechanical <- function(M, X, sigma_X, U_M) {
+  n    <- length(M)
+  opt0 <- find_optimal_alpha(0, M, X, sigma_X, U_M)
+  
   if (compute_chi2_red(opt0$chi2, n) <= 1.0) return(0)
   
   optimise(
     f = function(s) {
-      opt_s <- find_optimal_alpha(s, M, X, sigma_X, u_M)
+      opt_s <- find_optimal_alpha(s, M, X, sigma_X, U_M)
       (compute_chi2_red(opt_s$chi2, n) - 1.0)^2
     },
-    interval = c(0, 10)
+    interval = c(0, 10),
+    tol      = 1e-10
   )$minimum
 }
 
-compute_u_alpha <- function(alpha_opt, chi2_min, sigma_mech, M, X, sigma_X, u_M) {
-  chi2_threshold <- chi2_min + 1
+compute_u_alpha <- function(alpha_opt, chi2_min, sigma_mech, M, X, sigma_X, U_M) {
+  threshold <- chi2_min + 1
   
-  alpha_lower <- tryCatch(
+  lower <- tryCatch(
     uniroot(
-      function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, u_M) - chi2_threshold,
-      interval = c(alpha_opt - 0.05, alpha_opt)
+      function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, U_M) - threshold,
+      interval = c(alpha_opt - 0.05, alpha_opt),
+      tol      = 1e-14
     )$root,
     error = function(e) {
       warning("compute_u_alpha: lower bound not found, using fallback.")
@@ -205,10 +110,11 @@ compute_u_alpha <- function(alpha_opt, chi2_min, sigma_mech, M, X, sigma_X, u_M)
     }
   )
   
-  alpha_upper <- tryCatch(
+  upper <- tryCatch(
     uniroot(
-      function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, u_M) - chi2_threshold,
-      interval = c(alpha_opt, alpha_opt + 0.05)
+      function(a) compute_chi2(a, sigma_mech, M, X, sigma_X, U_M) - threshold,
+      interval = c(alpha_opt, alpha_opt + 0.05),
+      tol      = 1e-14
     )$root,
     error = function(e) {
       warning("compute_u_alpha: upper bound not found, using fallback.")
@@ -217,195 +123,189 @@ compute_u_alpha <- function(alpha_opt, chi2_min, sigma_mech, M, X, sigma_X, u_M)
   )
   
   list(
-    u_alpha = (alpha_upper - alpha_lower) / 2,
-    chi2_threshold = chi2_threshold,
-    alpha_lower = alpha_lower,
-    alpha_upper = alpha_upper
+    u_alpha     = (upper - lower) / 2,
+    threshold   = threshold,
+    alpha_min   = lower,
+    alpha_max   = upper,
+    sigma_mech  = sigma_mech
   )
 }
 
-run_chi2 <- function(dat) {
-  summ <- dat %>%
-    filter(target_g > 0) %>%
-    group_by(target_g) %>%
-    summarise(
-      mean_force_g = mean(force_g, na.rm = TRUE),
-      sd_force_g   = sd(force_g,   na.rm = TRUE),
-      n_rep        = n(),
-      se_force_g   = sd_force_g / sqrt(n_rep),
-      .groups = "drop"
-    )
-  
-  M   <- summ$target_g
-  X   <- summ$mean_force_g
-  sX  <- summ$se_force_g
-  u_M <- rep(u_balance, length(M))
-  n   <- length(M)
-  
-  sm  <- find_sigma_mechanical(M, X, sX, u_M)
-  opt <- find_optimal_alpha(sm, M, X, sX, u_M)
-  ua  <- compute_u_alpha(opt$alpha, opt$chi2, sm, M, X, sX, u_M)
-  
-  list(
-    alpha            = opt$alpha,
-    chi2_min         = opt$chi2,
-    chi2_red_min     = compute_chi2_red(opt$chi2, n),
-    chi2_threshold   = ua$chi2_threshold,
-    alpha_lower      = ua$alpha_lower,
-    alpha_upper      = ua$alpha_upper,
-    u_alpha          = ua$u_alpha,
-    sigma_mechanical = sm
-  )
+# ---- 2. FIND BEFORE / AFTER CHECK FILES -------------------------------------
+
+check_files <- list.files(
+  data_dir,
+  pattern = "Calibration.*(before|after)\\.csv$",
+  full.names = TRUE, ignore.case = TRUE
+)
+
+cat(sprintf("Found %d before/after calibration check files.\n", length(check_files)))
+if (length(check_files) == 0) {
+  stop("No before/after calibration check files found in ", data_dir,
+       ". Expected names like YYYYMMDD_..._CalibrationRaw_LoadCell_before.csv")
 }
 
-# ---- 5. COMPUTE SESSION-SPECIFIC ALPHA PER DATE -----------------------------
+check_index <- tibble(
+  filepath        = check_files,
+  filename        = basename(check_files),
+  experiment_date = substr(basename(check_files), 1, 8),
+  check           = tolower(stringr::str_extract(basename(check_files),
+                                                 "(?i)(before|after)(?=\\.csv$)"))
+)
 
-experiment_dates <- unique(calib_checks$experiment_date)
-cat(sprintf("Computing session-specific alpha for %d experiment date(s).\n\n",
-            length(experiment_dates)))
+bad_date <- check_index %>% filter(!grepl("^\\d{8}$", experiment_date))
+if (nrow(bad_date) > 0) {
+  stop("File name(s) do not start with YYYYMMDD:\n  ",
+       paste(bad_date$filename, collapse = "\n  "))
+}
 
-calib_params_list <- map_dfr(experiment_dates, function(d) {
-  
-  dat_before <- calib_checks %>%
-    filter(experiment_date == d, timing == "before")
-  dat_after  <- calib_checks %>%
-    filter(experiment_date == d, timing == "after")
-  
-  if (nrow(dat_before) == 0 || nrow(dat_after) == 0) {
-    warning(sprintf("Date %s: missing before or after file — skipping.", d))
-    return(NULL)
+dupes <- check_index %>% count(experiment_date, check) %>% filter(n > 1)
+if (nrow(dupes) > 0) {
+  stop("More than one '", paste(unique(dupes$check), collapse = "/"),
+       "' file for date(s): ", paste(unique(dupes$experiment_date), collapse = ", "),
+       ". Remove duplicates/copies from ", data_dir)
+}
+
+print(check_index %>% dplyr::select(experiment_date, check, filename), n = Inf)
+
+# ---- 3. READ, CLEAN AND SUMMARISE EACH CHECK --------------------------------
+
+check_raw <- pmap_dfr(check_index, function(filepath, filename, experiment_date, check) {
+  df <- read_csv(filepath, show_col_types = FALSE)
+  missing_cols <- setdiff(c("target_g", "force_g"), names(df))
+  if (length(missing_cols) > 0) {
+    stop(filename, " is missing column(s): ", paste(missing_cols, collapse = ", "),
+         "\n  Columns found: ", paste(names(df), collapse = ", "))
   }
-  
-  chi2_before <- run_chi2(dat_before)
-  chi2_after  <- run_chi2(dat_after)
-  
-  # Session alpha = mean of before and after
-  alpha_session <- mean(c(chi2_before$alpha, chi2_after$alpha))
-  
-  # Stability term across the session
-  # Standard uncertainty for a continuous rectangular (uniform) distribution
-  # spanning the observed before/after alpha interval.
-  sigma_within <- abs(chi2_after$alpha - chi2_before$alpha) / sqrt(12)
-  
-  # Standard uncertainty on the mean alpha from before/after chi-squared fits
-  u_alpha_mean <- sqrt(
-    chi2_before$u_alpha^2 + chi2_after$u_alpha^2
-  ) / 2
-  
-  # Combined standard uncertainty on alpha_session
-  u_alpha_session <- sqrt(u_alpha_mean^2 + sigma_within^2)
-  
-  # sigma_mechanical: use mean from before and after
-  sigma_mech <- mean(c(chi2_before$sigma_mechanical,
-                       chi2_after$sigma_mechanical))
-  
-  cat(sprintf("Date %s:\n", d))
-  cat(sprintf("  alpha_before  = %.8f (chi2 = %.4f)\n",
-              chi2_before$alpha, chi2_before$chi2_min))
-  cat(sprintf("  alpha_after   = %.8f (chi2 = %.4f)\n",
-              chi2_after$alpha,  chi2_after$chi2_min))
-  cat(sprintf("  alpha_session = %.8f\n",  alpha_session))
-  cat(sprintf("  sigma_within    = %.8f\n", sigma_within))
-  cat(sprintf("  u_alpha_mean    = %.8f\n", u_alpha_mean))
-  cat(sprintf("  u_alpha_session = %.8f\n\n", u_alpha_session))
-  
-  tibble(
-    experiment_date       = d,
-    alpha_before          = chi2_before$alpha,
-    alpha_after           = chi2_after$alpha,
-    
-    chi2_min_before       = chi2_before$chi2_min,
-    chi2_min_after        = chi2_after$chi2_min,
-    chi2_red_min_before   = chi2_before$chi2_red_min,
-    chi2_red_min_after    = chi2_after$chi2_red_min,
-    
-    chi2_threshold_before = chi2_before$chi2_threshold,
-    chi2_threshold_after  = chi2_after$chi2_threshold,
-    
-    alpha_lower_before    = chi2_before$alpha_lower,
-    alpha_upper_before    = chi2_before$alpha_upper,
-    alpha_lower_after     = chi2_after$alpha_lower,
-    alpha_upper_after     = chi2_after$alpha_upper,
-    
-    u_alpha_before        = chi2_before$u_alpha,
-    u_alpha_after         = chi2_after$u_alpha,
-    
-    alpha_session         = alpha_session,
-    sigma_within          = sigma_within,
-    u_alpha_mean          = u_alpha_mean,
-    u_alpha_session       = u_alpha_session,
-    
-    sigma_mechanical      = sigma_mech,
-    u_balance             = u_balance
-  )
+  df %>%
+    transmute(experiment_date = experiment_date,
+              check           = check,
+              filename        = filename,
+              target_g        = as.numeric(target_g),
+              force_g         = as.numeric(force_g))
 })
 
-cat("=== Session calibration parameters ===\n")
-print(calib_params_list, width = Inf)
+# force_g == 0 readings are HX711 artefacts (same rule as 1A and Script 2)
+n_zero <- sum(check_raw$force_g == 0, na.rm = TRUE)
+cat(sprintf("\nZero readings removed from checks: %d of %d\n", n_zero, nrow(check_raw)))
+check_raw <- check_raw %>% filter(force_g != 0, !is.na(force_g))
 
-# ---- 6. SAVE OUTPUTS --------------------------------------------------------
+check_summary <- check_raw %>%
+  filter(target_g > 0, !dplyr::near(target_g, scale_factor_mass, tol = 1e-6)) %>%
+  group_by(experiment_date, check, filename, target_g) %>%
+  summarise(
+    n_samples    = n(),
+    mean_force_g = mean(force_g),
+    sd_force_g   = sd(force_g),
+    se_force_g   = sd_force_g / sqrt(n_samples),
+    .groups = "drop"
+  )
 
-# Full session parameter table (used by 03_Analysis.R for per-date join)
-write_csv(calib_params_list,
-          file.path(output_dir, "Session_calibration_parameters.csv"))
+# ---- 4. CHI-SQUARED FIT FOR EACH CHECK --------------------------------------
 
-# Per-weight summary for diagnostics
-calib_check_summary <- calib_checks %>%
-  filter(target_g > 0) %>%
-  group_by(experiment_date, timing, target_g) %>%
-  summarise(n = n(), mean_g = mean(force_g, na.rm = TRUE),
-            sd_g = sd(force_g, na.rm = TRUE),
-            error_g = mean(force_g, na.rm = TRUE) - first(target_g),
-            .groups = "drop")
+check_fits <- check_summary %>%
+  group_by(experiment_date, check, filename) %>%
+  group_modify(~ {
+    M  <- .x$target_g
+    X  <- .x$mean_force_g
+    sX <- .x$se_force_g
+    UM <- rep(U_balance, length(M))
+    
+    if (length(M) < 2) {
+      stop("Check ", .y$filename, " has fewer than 2 usable masses after ",
+           "excluding 0 g and ", scale_factor_mass, " g.")
+    }
+    
+    sm  <- find_sigma_mechanical(M, X, sX, UM)
+    opt <- find_optimal_alpha(sm, M, X, sX, UM)
+    ua  <- compute_u_alpha(opt$alpha, opt$chi2, sm, M, X, sX, UM)
+    
+    tibble(
+      n_points         = length(M),
+      sigma_mechanical = sm,
+      alpha            = opt$alpha,
+      chi2_min         = opt$chi2,
+      chi2_red_min     = compute_chi2_red(opt$chi2, length(M)),
+      u_alpha          = ua$u_alpha
+    )
+  }) %>%
+  ungroup() %>%
+  arrange(experiment_date, desc(check == "before"))
 
-write_csv(calib_check_summary,
-          file.path(output_dir, "calibration_check_summary.csv"))
+cat("\n=== Chi-squared fit per calibration check ===\n")
+print(check_fits %>% dplyr::select(-filename), n = Inf, width = Inf)
+write_csv(check_fits, file.path(output_dir, "Calibration_check_fits.csv"))
 
-cat("\n=== 01_Calibration_Check.R complete ===\n")
-cat(sprintf("calibration_parameters.csv written with %d session(s).\n",
-            nrow(calib_params_list)))
+# ---- 5. COMBINE BEFORE + AFTER INTO ONE ALPHA PER SESSION -------------------
 
-# create a more readable table for the calibration parameters outputs
-parameter_descriptions <- tribble(
-  ~parameter,               ~description,
-  "alpha_before",           "Best-fitting calibration correction factor obtained before the friction experiments.",
-  "alpha_after",            "Best-fitting calibration correction factor obtained after the friction experiments.",
-  "chi2_min_before",        "Minimum chi-squared value obtained for the before-session calibration fit.",
-  "chi2_min_after",         "Minimum chi-squared value obtained for the after-session calibration fit.",
-  "chi2_red_min_before",    "Minimum reduced chi-squared for the before-session fit; values near 1 indicate agreement with the stated uncertainties.",
-  "chi2_red_min_after",     "Minimum reduced chi-squared for the after-session fit; values near 1 indicate agreement with the stated uncertainties.",
-  "chi2_threshold_before",  "Chi-squared threshold used to determine the uncertainty interval around alpha_before (chi2_min + 1).",
-  "chi2_threshold_after",   "Chi-squared threshold used to determine the uncertainty interval around alpha_after (chi2_min + 1).",
-  "alpha_lower_before",     "Lower bound of the uncertainty interval for alpha_before.",
-  "alpha_upper_before",     "Upper bound of the uncertainty interval for alpha_before.",
-  "alpha_lower_after",      "Lower bound of the uncertainty interval for alpha_after.",
-  "alpha_upper_after",      "Upper bound of the uncertainty interval for alpha_after.",
-  "u_alpha_before",         "Fit-derived standard uncertainty associated with alpha_before.",
-  "u_alpha_after",          "Fit-derived standard uncertainty associated with alpha_after.",
-  "alpha_session",          "Session-specific correction factor, calculated as the mean of alpha_before and alpha_after.",
-  "sigma_within",           "Standard uncertainty associated with slow within-session drift, assuming continuous uniform variation between alpha_before and alpha_after.",
-  "u_alpha_mean",           "Standard uncertainty of the mean calibration factor, propagated from u_alpha_before and u_alpha_after.",
-  "u_alpha_session",        "Combined standard uncertainty of alpha_session, combining u_alpha_mean and sigma_within in quadrature.",
-  "sigma_mechanical",       "Additional mechanical or instrumental force uncertainty required to obtain a reduced chi-squared close to 1.",
-  "u_balance",              "Standard uncertainty of the reference balance derived from its resolution."
-)
+check_wide <- check_fits %>%
+  dplyr::select(experiment_date, check, alpha, u_alpha, sigma_mechanical,
+                chi2_red_min, n_points) %>%
+  pivot_wider(names_from = check,
+              values_from = c(alpha, u_alpha, sigma_mechanical, chi2_red_min, n_points))
 
-calib_params_readable <- calib_params_list %>%
-  pivot_longer(
-    cols = -experiment_date,
-    names_to = "parameter",
-    values_to = "value"
+incomplete <- check_wide %>%
+  filter(is.na(alpha_before) | is.na(alpha_after))
+if (nrow(incomplete) > 0) {
+  stop("Missing a before or after check for date(s): ",
+       paste(incomplete$experiment_date, collapse = ", "))
+}
+
+session_params <- check_wide %>%
+  mutate(
+    alpha_session    = (alpha_before + alpha_after) / 2,
+    u_alpha_fit      = sqrt(u_alpha_before^2 + u_alpha_after^2) / 2,
+    u_alpha_stab     = abs(alpha_after - alpha_before) / (2 * sqrt(3)),
+    u_alpha_session  = sqrt(u_alpha_fit^2 + u_alpha_stab^2),
+    sigma_mechanical = sqrt((sigma_mechanical_before^2 + sigma_mechanical_after^2) / 2),
+    u_balance        = U_balance,
+    alpha_drift_pct  = 100 * (alpha_after / alpha_before - 1)
   ) %>%
-  left_join(parameter_descriptions, by = "parameter") %>%
-  dplyr::select(parameter, description, experiment_date, value) %>%
-  pivot_wider(
-    names_from = experiment_date,
-    values_from = value
-  ) %>%
-  arrange(match(parameter, parameter_descriptions$parameter))
+  dplyr::select(experiment_date,
+                alpha_before, u_alpha_before, alpha_after, u_alpha_after,
+                alpha_drift_pct,
+                alpha_session, u_alpha_fit, u_alpha_stab, u_alpha_session,
+                sigma_mechanical_before, sigma_mechanical_after, sigma_mechanical,
+                chi2_red_min_before, chi2_red_min_after,
+                n_points_before, n_points_after,
+                u_balance) %>%
+  arrange(experiment_date)
 
-write_csv(
-  calib_params_readable,
-  file.path(output_dir, "Session_calibration_parameters_readable.csv")
-)
+cat("\n=== Session calibration parameters (used by Script 3) ===\n")
+print(session_params %>%
+        dplyr::select(experiment_date, alpha_before, alpha_after, alpha_drift_pct,
+                      alpha_session, u_alpha_session, sigma_mechanical),
+      n = Inf, width = Inf)
 
+write_csv(session_params, file.path(output_dir, "Session_calibration_parameters.csv"))
+
+# ---- 6. FIGURE: alpha before / after per session ----------------------------
+
+alpha_plot_dat <- check_fits %>%
+  mutate(check = factor(check, levels = c("before", "after")),
+         date  = as.Date(experiment_date, format = "%Y%m%d"))
+
+p_alpha_sessions <- ggplot(alpha_plot_dat,
+                           aes(x = factor(date), y = alpha, shape = check)) +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_errorbar(aes(ymin = alpha - u_alpha, ymax = alpha + u_alpha),
+                width = 0.15, colour = "grey20",
+                position = position_dodge(width = 0.4)) +
+  geom_point(size = 3, colour = "grey20",
+             position = position_dodge(width = 0.4)) +
+  geom_point(data = session_params %>%
+               mutate(date = as.Date(experiment_date, format = "%Y%m%d")),
+             aes(x = factor(date), y = alpha_session),
+             inherit.aes = FALSE, shape = 4, size = 4, colour = "firebrick4") +
+  labs(x = "\nExperiment date", y = expression(alpha), shape = "Check") +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p_alpha_sessions)
+
+ggsave(file.path(output_dir, "calibration_check_alpha_by_session.png"),
+       p_alpha_sessions, width = 7, height = 4.5, dpi = 600)
+
+cat("\n=== 1B_Session_Calibration_for_Transfer.R complete ===\n")
+cat("Session_calibration_parameters.csv written with",
+    nrow(session_params), "session(s) to", output_dir, "\n")
