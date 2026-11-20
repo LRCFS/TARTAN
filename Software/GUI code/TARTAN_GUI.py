@@ -8,10 +8,14 @@ import queue
 import time
 import csv
 import os
+from pathlib import Path
 import serial
 from collections import deque
 
 from PIL import Image, ImageTk
+
+# Load image assets relative to this script, not the launch directory.
+ASSET_DIR = Path(__file__).resolve().parent
 
 # ==========================
 # USER CONFIG
@@ -20,7 +24,7 @@ DEVICE_NAME     = "TARTAN"
 DEVICE_SUBTITLE = "Transfer Apparatus for Repetitive Tactile Application and Normalisation"
 
 DEFAULT_PORT_UNO  = "COM17"   # Uno  (motors)   — update to match Device Manager
-DEFAULT_PORT_NANO = "COM28"   # Nano (load cell) — update to match Device Manager
+DEFAULT_PORT_NANO = "COM16"   # Nano (load cell) — update to match Device Manager
 DEFAULT_BAUD      = 115200
 
 STEPS_PER_MM       = 400.0
@@ -210,11 +214,15 @@ class App(tk.Tk):
         self.run_total_steps     = 0      # total steps for current move
         self.run_move_start_time = None   # time.time() when MOVE_START received
         self.run_steps_per_sec   = 0.0    # steps/s for current move
+        self.uno_issued_steps = 0  # Start each CSV run at zero pulses, not the previous move
+        self.uno_move_started = False  # Ignore stale STEP_COUNT before this MOVE_START
+        self.run_post_completion_samples = 0
+        self.run_completion_received = False
         self._auto_finish_id     = None   # fallback timer if MOVE_DONE never arrives
         self.run_out_dir         = None
         self.run_base_name       = tk.StringVar(value="")
 
-        self.cal_status  = tk.StringVar(value="Click 'Start recording calibration' to begin.")
+        self.cal_status  = tk.StringVar(value="Click 'Start calibration check' to begin.")
         self.run_status  = tk.StringVar(value="Idle.")
         self.tare_status = tk.StringVar(value="")
 
@@ -227,7 +235,7 @@ class App(tk.Tk):
         self.raw0 = None
         self.raw1 = None
 
-        # Calibration recording
+        # Multi-mass calibration check
         self.cal_weights     = []
         self.cal_index       = 0
         self.cal_running     = False
@@ -281,10 +289,10 @@ class App(tk.Tk):
             parent,
             "This graphical user interface (GUI) controls the TARTAN device, "
             "developed to enable controlled, repeatable studies of contact-based transfer.\n"
-            "The typical workflow is as followed:\n"
+            "The typical workflow is as follows:\n"
             "  1) Connect to both Arduinos and start the live data stream.\n"
-            "  2) Define the load cell scale using the Reference weight / Known weight tare procedure.\n"
-            "  3) Optionally assess calibration performance using repeated known loads.\n"
+            "  2) Establish the firmware tare offset and scale factor using zero load and a known reference mass.\n"
+            "  3) Perform a multi-mass calibration check when required.\n"
             "  4) Run controlled transfer movements while recording data to file.\n\n"
             "This GUI and device are described in the following publications:\n"
             "TARTAN: a transparent, calibratable fibre transfer platform based on repurposed motion systems, Virginie Galais, Cameron Anderson, Niamh Nic Daéid, Hervé Ménard. "
@@ -307,20 +315,21 @@ class App(tk.Tk):
 
         s = ttk.LabelFrame(parent, text="")
         s.pack(fill="x", padx=(8,12), pady=(0,8))
-        self._add_highlight(s, "2) Load cell calibration (scale & zero reference)")
+        self._add_highlight(s, "2) Firmware tare and scale-factor setup")
         self._add_section_description(s,
-            "Calibrate how the applied load is converted into force values (grams). "
-            "Capture zero load then a known weight to compute the scale. "
-            "The calibration is saved to the Nano.\n\n"
-            "A saved scale can be reused across sessions, "
-            "but a tare must be applied each time.")
+            "Establish the zero-load tare offset and the scale factor used to convert raw HX711 counts to grams. "
+            "Capture the zero-load reference, then a known reference mass, and compute the scale factor. "
+            "The scale factor is saved to the Nano EEPROM and can be reused across sessions, "
+            "but the tare must be re-established at the start of each session.")
         self._build_tare(s)
 
         s = ttk.LabelFrame(parent, text="")
         s.pack(fill="both", expand=True, padx=12, pady=(0,8))
-        self._add_highlight(s, "3) Calibration recording (table updates as you record)")
+        self._add_highlight(s, "3) Multi-mass calibration check ")
         self._add_section_description(s,
-            "Record repeated measurements at known applied loads to assess calibration performance.")
+            "Record repeated converted load-cell readings at several reference masses to assess residual measurement error. "
+            "For transfer experiments, perform this check immediately before and after the experimental runs. "
+            "This check does not modify the firmware scale factor.")
         self._build_calibration_recording(s)
 
         s = ttk.LabelFrame(parent, text="")
@@ -380,19 +389,29 @@ class App(tk.Tk):
 
     def _load_logo(self, candidates, height=55):
         for fn in candidates:
+            path = ASSET_DIR / fn
             try:
-                img = Image.open(fn).convert("RGBA")
+                with Image.open(path) as source:
+                    img = source.convert("RGBA")
                 w, h = img.size
-                img  = img.resize((int(w * height / h), height), Image.LANCZOS)
+                img = img.resize((max(1, round(w * height / h)), height), Image.LANCZOS)
+                print(f"[TARTAN images] Loaded: {path}")
                 return ImageTk.PhotoImage(img)
-            except: continue
+            except (OSError, ValueError) as exc:
+                print(f"[TARTAN images] Could not load {path}: {exc}")
+        print(f"[TARTAN images] No logo found among: {candidates}")
         return tk.PhotoImage(width=1, height=1)
 
     def _load_small_icon(self, filename, size=16):
+        path = ASSET_DIR / filename
         try:
-            img = Image.open(filename).convert("RGBA").resize((size,size), Image.LANCZOS)
+            with Image.open(path) as source:
+                img = source.convert("RGBA")
+            img = img.resize((size, size), Image.LANCZOS)
             return ImageTk.PhotoImage(img)
-        except: return None
+        except (OSError, ValueError) as exc:
+            print(f"[TARTAN images] Could not load icon {path}: {exc}")
+            return None
 
     # ---------------- Section 1: Connection ----------------
     def _build_connection(self, parent):
@@ -405,7 +424,7 @@ class App(tk.Tk):
         ttk.Entry(row, textvariable=self.uno_port_var, width=10).grid(row=0, column=1, padx=(0,2), pady=6)
         ttk.Button(row, image=self.info_icon, style="Info.TButton",
                    command=lambda: self._show_info("Uno port",
-                       "COM port for the Arduino Uno (motors + endstops).\n"
+                       "COM port for the Arduino Uno (motors + limit switchs).\n"
                        "Found in Device Manager → Ports (COM & LPT).")
         ).grid(row=0, column=2, padx=(0,10), pady=(0,6), sticky="nw")
 
@@ -434,7 +453,7 @@ class App(tk.Tk):
         ttk.Entry(row2, textvariable=self.nano_port_var, width=10).grid(row=0, column=1, padx=(0,2), pady=6)
         ttk.Button(row2, image=self.info_icon, style="Info.TButton",
                    command=lambda: self._show_info("Nano port",
-                       "COM port for the Arduino Nano Every (HX711 load cell only).\n"
+                       "COM port for the Arduino Nano (HX711 load cell only).\n"
                        "Found in Device Manager → Ports (COM & LPT).\n"
                        "Must be different from the Uno port.")
         ).grid(row=0, column=2, padx=(0,10), pady=(0,6), sticky="nw")
@@ -482,45 +501,46 @@ class App(tk.Tk):
                        "Typical values: 10–30. Does not affect live streaming.")
         ).grid(row=0, column=2, padx=(0,10), pady=(0,6), sticky="nw")
 
-        ttk.Label(row, text="Known weight (g):").grid(
+        ttk.Label(row, text="Reference mass (g):").grid(
             row=0, column=3, padx=(0,6), pady=6, sticky="e")
-        self.known_weight_g_var = tk.StringVar(value="498.81")
+        self.known_weight_g_var = tk.StringVar(value="899.45")
         ttk.Entry(row, textvariable=self.known_weight_g_var, width=10).grid(
             row=0, column=4, padx=(0,2), pady=6, sticky="w")
         ttk.Button(row, image=self.info_icon, style="Info.TButton",
-                   command=lambda: self._show_info("Known weight (g)",
-                       "Physical mass used to calibrate the load cell. "
-                       "Use a calibrated weight whenever possible.")
+                   command=lambda: self._show_info("Reference mass (g)",
+                       "Known reference mass used with the zero-load reading to establish the firmware scale factor. "
+                       "Use an accurately measured mass within the load-cell operating range.")
         ).grid(row=0, column=5, padx=(0,10), pady=(0,6), sticky="nw")
 
-        self.btn_raw0 = ttk.Button(row, text="Capture zero load",
+        self.btn_raw0 = ttk.Button(row, text="Capture zero-load reference",
                                    command=self.on_capture_raw0, state="disabled")
         self.btn_raw0.grid(row=0, column=6, padx=(0,6), pady=6)
         self.btn_info_raw0 = ttk.Button(row, image=self.info_icon, style="Info.TButton",
-            command=lambda: self._show_info("Capture zero load",
-                "Remove ALL weight from the load cell, then click.\n"
-                "Records the raw baseline (zero-load reference)."))
+            command=lambda: self._show_info("Capture zero-load reference",
+                "Remove ALL load from the load cell, then click.\n"
+                "The averaged raw HX711 output is used to establish the tare offset."))
         self.btn_info_raw0.grid(row=0, column=7, padx=(0,10), pady=(0,6), sticky="nw")
 
-        self.btn_raw1 = ttk.Button(row, text="Capture known load",
+        self.btn_raw1 = ttk.Button(row, text="Capture reference mass",
                                    command=self.on_capture_raw1, state="disabled")
         self.btn_raw1.grid(row=0, column=8, padx=(0,6), pady=6)
         self.btn_info_raw1 = ttk.Button(row, image=self.info_icon, style="Info.TButton",
-            command=lambda: self._show_info("Capture known load",
-                "Place the known weight on the load cell, then click.\n"
-                "Records the raw value under a known load."))
+            command=lambda: self._show_info("Capture reference mass",
+                "Place the reference mass on the load cell, then click.\n"
+                "The averaged raw HX711 output is used with the zero-load reference to calculate the scale factor."))
         self.btn_info_raw1.grid(row=0, column=9, padx=(0,10), pady=(0,6), sticky="nw")
 
-        self.btn_set_save_scale = ttk.Button(row, text="Compute + save calibration",
+        self.btn_set_save_scale = ttk.Button(row, text="Compute + save scale factor",
                                              command=self.on_set_and_save_scale, state="disabled")
         self.btn_set_save_scale.grid(row=0, column=10, padx=(0,6), pady=6)
         self.btn_info_scale = ttk.Button(row, image=self.info_icon, style="Info.TButton",
-            command=lambda: self._show_info("Compute + save calibration",
-                "scale = (raw_known − raw_zero) / known_weight_g\n\n"
-                "Saves to Nano EEPROM and applies a tare for this session."))
+            command=lambda: self._show_info("Compute + save scale factor",
+                "scale factor = (raw_reference − raw_zero) / reference_mass_g\n\n"
+                "The scale factor converts raw counts to grams and is saved to Nano EEPROM. "
+                "A tare is then applied to re-establish the zero reference for the current session."))
         self.btn_info_scale.grid(row=0, column=11, padx=(0,10), pady=(0,6), sticky="nw")
 
-        self.btn_load_scale_file = ttk.Button(row, text="Load scale from file",
+        self.btn_load_scale_file = ttk.Button(row, text="Load scale factor from file",
                                               command=self.on_load_scale_from_file, state="disabled")
         self.btn_load_scale_file.grid(row=0, column=12, padx=(0,6), pady=6)
 
@@ -537,17 +557,46 @@ class App(tk.Tk):
                   text="Moves platform 10 cm UP at 1 cm/s to allow weights to be placed on the load cell.",
                   foreground="gray").grid(row=0, column=1, padx=6, pady=6, sticky="w")
 
-        ttk.Label(parent, textvariable=self.tare_status).pack(fill="x", padx=(8,12), pady=(0,8))
+        # Calibration messages: red text, with selected instructions in red bold.
+        self.tare_message = tk.Text(
+            parent, height=2, wrap="word", font=("Segoe UI", 10),
+            fg="red", bg="white", relief="flat", borderwidth=0,
+            highlightthickness=0, cursor="arrow", takefocus=0
+        )
+        self.tare_message.pack(fill="x", padx=(8,12), pady=(0,8))
+        self.tare_message.tag_configure(
+            "red_bold", foreground="red", font=("Segoe UI", 10, "bold")
+        )
+        # Preserve all existing tare_status.set(...) calls in the GUI.
+        self.tare_status.trace_add("write", self._update_tare_message)
+        self._update_tare_message()
 
-    # ---------------- Section 3: Calibration recording ----------------
+    def _update_tare_message(self, *_):
+        """Display the latest calibration status and emphasise key instructions."""
+        message = self.tare_status.get()
+        self.tare_message.configure(state="normal")
+        self.tare_message.delete("1.0", "end")
+        self.tare_message.insert("1.0", message)
+
+        emphasis = "Remove the reference weight"
+        start = message.find(emphasis)
+        if start >= 0:
+            self.tare_message.tag_add(
+                "red_bold", f"1.0+{start}c", f"1.0+{start + len(emphasis)}c"
+            )
+        self.tare_message.configure(state="disabled")
+
+    # ---------------- Section 3: Multi-mass calibration check ----------------
     def _build_calibration_recording(self, parent):
         inputs = ttk.Frame(parent)
         inputs.pack(fill="x", padx=(8,12), pady=(0,4))
 
-        ttk.Label(inputs, text="Weights to test (g):").grid(row=0, column=0, padx=6, pady=6, sticky="e")
+        ttk.Label(inputs, text="Reference masses (g):").grid(row=0, column=0, padx=6, pady=6, sticky="e")
         ttk.Button(inputs, image=self.info_icon, style="Info.TButton",
-            command=lambda: self._show_info("Weights to test",
-                "Enter weights separated by commas.\nExample: 0,100,500,900")
+            command=lambda: self._show_info("Reference masses",
+                "Enter the reference masses to be checked, separated by commas.\n"
+                "Use accurately measured masses spanning the operating range. For an independent session check, "
+                "do not use the reference mass used to establish the firmware scale factor.")
         ).grid(row=0, column=1, padx=(0,6), pady=(0,6), sticky="w")
         self.cal_weights_var = tk.StringVar(value="0,99.47,499.47,899.45")
         ttk.Entry(inputs, textvariable=self.cal_weights_var, width=40).grid(
@@ -566,20 +615,20 @@ class App(tk.Tk):
 
         buttons = ttk.Frame(parent)
         buttons.pack(fill="x", padx=(8,12), pady=(0,6))
-        self.btn_start_cal = ttk.Button(buttons, text="Start recording calibration",
+        self.btn_start_cal = ttk.Button(buttons, text="Start calibration check",
                                         command=self.on_start_calibration_recording, state="disabled")
         self.btn_start_cal.grid(row=0, column=0, padx=6, pady=6)
         self.btn_clear_cal = ttk.Button(buttons, text="Clear table",
                                         command=self.on_clear_cal_table, state="disabled")
         self.btn_clear_cal.grid(row=0, column=1, padx=6, pady=6)
-        self.btn_save_cal_raw = ttk.Button(buttons, text="Save raw calibration data",
+        self.btn_save_cal_raw = ttk.Button(buttons, text="Save calibration-check data",
                                            command=self.on_save_cal_raw_file, state="disabled")
         self.btn_save_cal_raw.grid(row=0, column=2, padx=6, pady=6)
         buttons.columnconfigure(4, weight=1)
 
         table_holder = ttk.Frame(parent)
         table_holder.pack(fill="both", expand=True, padx=12, pady=(0,6))
-        cols = ("Known (g)", "Mean (g)", "Diff (g)", "SD (g)", "n")
+        cols = ("Reference mass (g)", "Mean (g)", "Error (g)", "SD (g)", "n")
         self.cal_tree = ttk.Treeview(table_holder, columns=cols, show="headings", height=6)
         for c in cols:
             self.cal_tree.heading(c, text=c)
@@ -780,12 +829,24 @@ class App(tk.Tk):
         if not s or s.startswith("#"): return
         print("UNO RX <", s)
 
+        if s.startswith("STEP_COUNT,"):
+            try:
+                count = int(s.split(",", 1)[1])
+            except (ValueError, IndexError):
+                return
+            if self.logging and self.run_active and self.uno_move_started and count >= 0:
+                self.uno_issued_steps = count
+            return
+
         if not s.startswith("EVENT,"): return
 
         parts = s.split(",")
         event = parts[1] if len(parts) > 1 else ""
 
         if event == "MOVE_START":
+            if self.run_active:
+                self.uno_move_started = True
+                self.uno_issued_steps = 0
             self.live["mode"] = "MOVE"
             self.v_mode.set("MOVE")
             if self.run_active:
@@ -795,6 +856,11 @@ class App(tk.Tk):
                 # is sent — do not overwrite it here.
 
         elif event == "MOVE_DONE":
+            if self.run_active and self.logging:
+                self.run_completion_received = True
+                # The Uno already sent its final STEP_COUNT before MOVE_DONE.
+                # Do not add a synthetic CSV row with an empty force value.
+                # Nano readings during the short post-move window carry the final count.
             self.live["mode"] = "IDLE"
             self.v_mode.set("IDLE")
             self.run_moving = False
@@ -803,10 +869,10 @@ class App(tk.Tk):
                 # Defer file close by 200 ms to catch any in-flight Nano samples.
                 self.run_active = False
                 self.run_started_move = False
-                self.after(200, self._finish_run_logging)
+                self.after(400, self._finish_run_logging)
             if self.hh_cal_active and self.hh_cal_stage == "MOVE_OUT":
                 self.hh_cal_stage = "HOMING"
-                self.run_status.set("Platform position calibration: homing DOWN to endstop...")
+                self.run_status.set("Platform position calibration: homing DOWN to limit switch...")
                 self.send_uno("HOME_HIT 1.0")
 
         elif event == "HOME_START":
@@ -824,10 +890,19 @@ class App(tk.Tk):
         elif event == "HOME_TIMEOUT":
             self.live["mode"] = "IDLE"
             self.v_mode.set("IDLE")
-            messagebox.showwarning("Home timeout", "Home move timed out — endstop not reached.")
+            messagebox.showwarning("Home timeout", "Home move timed out — limit switch not reached.")
+
+        elif event == "BOTTOM_LIMIT":
+            if self.run_active:
+                self._end_aborted_run("Bottom limit switch hit — incomplete run.")
+            self.live["mode"] = "IDLE"
+            self.v_mode.set("E-STOP")
+            messagebox.showwarning("Bottom limit", "Downward movement stopped at bottom endstop.")
 
         elif event == "ESTOP":
-            # Top endstop hit during an upward move. The Uno has already stopped
+            if self.run_active:
+                self._end_aborted_run("Top limit switch hit — incomplete run.")
+            # Top limit switch hit during an upward move. The Uno has already stopped
             # the motors, so we only need to tear down any active run and warn.
             self.live["mode"] = "IDLE"
             self.v_mode.set("E-STOP")
@@ -866,12 +941,12 @@ class App(tk.Tk):
                 self.btn_run.configure(state="normal")
             except: pass
 
-            self.run_status.set("EMERGENCY STOP: top endstop triggered — motors stopped.")
+            self.run_status.set("EMERGENCY STOP: top limit switch triggered — motors stopped.")
             messagebox.showwarning(
                 "Emergency stop",
-                "The top endstop was triggered while moving up.\n"
+                "The top limit switch was triggered while moving up.\n"
                 "The motors have been stopped.\n\n"
-                "Use 'Return home' or a DOWN move to bring the platform back down.")
+                "Use 'Return home'to bring the platform back down.")
 
         elif event == "OFF":
             self.live["mode"] = "IDLE"
@@ -897,12 +972,12 @@ class App(tk.Tk):
             expected = getattr(self, "_pending_scale_expected", None)
             if expected is not None:
                 if abs(v - expected) < 1e-3:
-                    self.tare_status.set(f"✅ Scale confirmed on Nano: {v:.6f} (counts/g)")
+                    self.tare_status.set(f"✅ Scale factor confirmed on Nano: {v:.6f} counts/g")
                 else:
-                    self.tare_status.set(f"⚠️ Nano scale is {v:.6f}, expected {expected:.6f}")
+                    self.tare_status.set(f"⚠️ Nano scale factor is {v:.6f}, expected {expected:.6f}")
                 self._pending_scale_expected = None
             else:
-                self.tare_status.set(f"Nano scale: {v:.6f} (counts/g)")
+                self.tare_status.set(f"Nano scale factor: {v:.6f} counts/g")
             return
 
         # 2-col stream: t_ms,force_g
@@ -918,18 +993,20 @@ class App(tk.Tk):
 
         # Write to CSV log if running
         if self.logging and self.log_writer:
+            if self.run_completion_received:
+                self.run_post_completion_samples += 1
             now      = time.localtime()
             speed_cs = getattr(self, "current_run_speed_cm_s", "")
-            if self.run_moving and self.run_move_start_time is not None:
-                elapsed = time.time() - self.run_move_start_time
-                steps_remaining = max(0, int(self.run_total_steps - elapsed * self.run_steps_per_sec))
-            else:
-                steps_remaining = 0
+            # Step count is issued by the Uno; no elapsed-time estimation.
+            # A blank cell means no real pulse count has arrived yet.
+            issued = self.uno_issued_steps
+            distance_cm = (issued / (STEPS_PER_MM * 10.0)) if issued is not None else None
             self.log_writer.writerow({
                 "date":       time.strftime("%Y-%m-%d", now),
                 "time":       time.strftime("%H:%M:%S", now),
                 "speed_cm_s": f"{float(speed_cs):.1f}" if speed_cs != "" else "",
-                "steps":      steps_remaining,
+                "steps":      issued if issued is not None else "",
+                "distance_cm": f"{distance_cm:.3f}" if distance_cm is not None else "",
                 "force_g":    f"{force_g:.3f}",
             })
 
@@ -952,13 +1029,15 @@ class App(tk.Tk):
         if not self.nano_worker:
             messagebox.showerror("Nano not connected", "Connect the Nano first.")
             return
-        messagebox.showinfo("Zero load", "Remove ALL weight from the load cell.\nClick OK to capture.")
+        messagebox.showinfo("Zero-load reference", "Remove ALL load from the load cell.\nClick OK to capture the zero-load reference.")
         self.latest_raw = None
         self.send_nano(f"RAW {self._get_raw_n()}")
         def w():
             try:
                 self.raw0 = self._wait_for_raw()
-                self.tare_status.set(f"Zero load captured: raw={self.raw0}. Now place known weight.")
+                self.after(0, lambda: self.tare_status.set(
+                    f"Zero-load reference captured: raw={self.raw0}. Now place the reference mass and click 'Capture reference mass"
+                ))
             except Exception as e:
                 messagebox.showerror("Zero load", str(e))
         threading.Thread(target=w, daemon=True).start()
@@ -974,35 +1053,36 @@ class App(tk.Tk):
             wgt = float(self.known_weight_g_var.get())
             if wgt <= 0: raise ValueError
         except:
-            messagebox.showerror("Known weight", "Enter a valid weight in grams.")
+            messagebox.showerror("Reference mass", "Enter a valid reference mass in grams.")
             return
-        messagebox.showinfo("Known load", f"Place the known weight ({wgt:.0f} g).\nClick OK to capture.")
+        messagebox.showinfo("Reference mass", f"Place the reference mass ({wgt:.2f} g).\nClick OK to capture.")
         self.latest_raw = None
         self.send_nano(f"RAW {self._get_raw_n()}")
         def w():
             try:
                 self.raw1 = self._wait_for_raw()
                 diff = self.raw1 - self.raw0
-                self.tare_status.set(
-                    f"Known load captured ({wgt:.0f} g): raw={self.raw1}, diff={diff}. "
-                    "Now click 'Compute + save calibration'.")
+                self.after(0, lambda: self.tare_status.set(
+                    f"Reference mass captured ({wgt:.2f} g): raw={self.raw1}, diff={diff}.\n"
+                    "Remove the reference weight, then click 'Compute + save scale factor'."
+                ))
             except Exception as e:
-                messagebox.showerror("Known load", str(e))
+                messagebox.showerror("Reference mass", str(e))
         threading.Thread(target=w, daemon=True).start()
 
     def on_set_and_save_scale(self):
         if self.raw0 is None or self.raw1 is None:
-            messagebox.showwarning("Missing", "Capture zero load and known load first.")
+            messagebox.showwarning("Missing", "Capture the zero-load reference and reference mass first.")
             return
         try:
             wgt = float(self.known_weight_g_var.get())
             if wgt <= 0: raise ValueError
         except:
-            messagebox.showerror("Known weight", "Enter a valid weight in grams.")
+            messagebox.showerror("Reference mass", "Enter a valid reference mass in grams.")
             return
         diff = self.raw1 - self.raw0
         if abs(diff) < 10:
-            messagebox.showerror("Scale", "Difference too small — check wiring and weight.")
+            messagebox.showerror("Scale factor", "Raw-count difference is too small — check the reference mass and wiring.")
             return
         scale_val = diff / wgt
         self.send_nano(f"SET_SCALE {scale_val:.6f}")
@@ -1015,26 +1095,26 @@ class App(tk.Tk):
         try:
             self._autosave_scale_file(scale_val, self.raw0, self.raw1, wgt)
         except Exception as e:
-            messagebox.showwarning("Scale file", f"Scale applied, but could not save file.\n\n{e}")
-        self.tare_status.set(f"Scale set + saved on Nano. scale = {scale_val:.6f} counts/g")
+            messagebox.showwarning("Scale-factor file", f"Scale factor applied, but could not save file.\n\n{e}")
+        self.tare_status.set(f"Scale factor set and saved on Nano: {scale_val:.6f} counts/g. Tare applied for this session.")
 
     def on_load_scale_from_file(self):
         if not self.nano_worker:
             messagebox.showerror("Nano not connected", "Connect the Nano first.")
             return
         path = filedialog.askopenfilename(
-            title="Select a saved scale file",
+            title="Select a saved scale-factor file",
             filetypes=[("CSV files","*.csv"),("Text files","*.txt"),("All files","*.*")])
         if not path: return
         try:
             scale_val = self._read_scale_value_from_file(path)
         except Exception as e:
-            messagebox.showerror("Load scale", str(e))
+            messagebox.showerror("Load scale factor", str(e))
             return
         self._pending_scale_expected = float(scale_val)
         self.send_nano(f"SET_SCALE {scale_val:.6f}")
-        do_save = messagebox.askyesno("Save to Nano?", "Save to Nano EEPROM as well?")
-        do_tare = messagebox.askyesno("Tare now?", "Apply tare for this session?")
+        do_save = messagebox.askyesno("Save scale factor to Nano?", "Save this scale factor to Nano EEPROM as well?")
+        do_tare = messagebox.askyesno("Re-tare now?", "Re-establish the zero reference now?\n\nThis should be done at the start of each session with no load applied.")
         def _followup():
             if do_save: self.send_nano("SAVE_SCALE")
             if do_tare: self.send_nano("TARE")
@@ -1091,7 +1171,7 @@ class App(tk.Tk):
         raise ValueError("No numeric value found.")
 
     # ==========================
-    # Section 3: Calibration recording
+    # Section 3: Multi-mass calibration check
     # ==========================
     def on_clear_cal_table(self):
         for iid in self.cal_tree.get_children(): self.cal_tree.delete(iid)
@@ -1132,14 +1212,14 @@ class App(tk.Tk):
         self.cal_running = True
         self.on_clear_cal_table()
         self.cal_raw_results = []
-        self.cal_status.set("Calibration recording started.")
+        self.cal_status.set("Multi-mass calibration check started.")
         self._prompt_and_capture_next_weight()
 
     def _prompt_and_capture_next_weight(self):
         if not self.cal_running: return
         if self.cal_index >= len(self.cal_weights):
             self.cal_running = False
-            self.cal_status.set("Finished. Click 'Save raw calibration data'.")
+            self.cal_status.set("Finished. Click 'Save calibration-check data'.")
             messagebox.showinfo("Done", "All weights recorded.")
             return
         target_g, target_dec = self.cal_weights[self.cal_index]
@@ -1181,7 +1261,7 @@ class App(tk.Tk):
         self.cal_results.append({
             "date":target_txt,"target_g":target_g,"mean_g":m,"sd_g":sd,"diff_g":diff_g,"n":len(samples)})
         self.cal_status.set(
-            f"Recorded {target_txt} g → Mean={m:.2f}, Diff={diff_g:+.2f}, SD={sd:.2f} (n={len(samples)})")
+            f"Recorded {target_txt} g → Mean={m:.2f}, Error={diff_g:+.2f}, SD={sd:.2f} (n={len(samples)})")
         self.cal_index += 1
         self._prompt_and_capture_next_weight()
 
@@ -1190,23 +1270,23 @@ class App(tk.Tk):
         if not rows: messagebox.showwarning("Empty","Table is empty."); return
         label = self.cal_label_var.get().strip() or "LoadCell"
         path  = filedialog.asksaveasfilename(
-            initialfile=f"{today_yyyymmdd()}_Calibration_{label}.csv",
+            initialfile=f"{today_yyyymmdd()}_CalibrationCheck_{label}.csv",
             defaultextension=".csv", filetypes=[("CSV","*.csv"),("All files","*.*")])
         if not path: return
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", newline="", encoding="utf-8") as fp:
             w = csv.writer(fp)
-            w.writerow(["Known (g)","Mean (g)","Diff (g)","SD (g)","n"])
+            w.writerow(["Reference mass (g)","Mean (g)","Error (g)","SD (g)","n"])
             for r in rows: w.writerow(list(r))
         self.cal_status.set(f"Saved: {path}")
-        messagebox.showinfo("Saved", f"Calibration saved:\n{path}")
+        messagebox.showinfo("Saved", f"Calibration check saved:\n{path}")
 
     def on_save_cal_raw_file(self):
         if not self.cal_raw_results:
             messagebox.showwarning("Empty","No raw data recorded yet."); return
         label = self.cal_label_var.get().strip() or "LoadCell"
         path  = filedialog.asksaveasfilename(
-            initialfile=f"{today_yyyymmdd()}_CalibrationRaw_{label}.csv",
+            initialfile=f"{today_yyyymmdd()}_CalibrationCheck_{label}.csv",
             defaultextension=".csv", filetypes=[("CSV","*.csv"),("All files","*.*")])
         if not path: return
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1217,8 +1297,8 @@ class App(tk.Tk):
                     extrasaction="ignore")
                 w.writeheader()
                 for r in self.cal_raw_results: w.writerow(r)
-            self.cal_status.set(f"Saved raw: {path}")
-            messagebox.showinfo("Saved", f"Raw data saved:\n{path}")
+            self.cal_status.set(f"Saved calibration-check data: {path}")
+            messagebox.showinfo("Saved", f"Calibration-check data saved:\n{path}")
         except Exception as e:
             messagebox.showerror("Save error", str(e))
 
@@ -1297,7 +1377,7 @@ class App(tk.Tk):
             self.log_fp     = open(path, "w", newline="", encoding="utf-8")
             self.current_run_speed_cm_s = float(speed_cm_s)
             self.log_writer = csv.DictWriter(self.log_fp,
-                fieldnames=["date","time","speed_cm_s","steps","force_g"])
+                fieldnames=["date","time","speed_cm_s","steps","distance_cm","force_g"])
             self.log_writer.writeheader()
             self.log_fp.flush()
         except Exception as e:
@@ -1306,6 +1386,10 @@ class App(tk.Tk):
         self.logging          = True
         self.run_active       = True
         self.run_started_move = False
+        self.uno_issued_steps = 0
+        self.uno_move_started = False
+        self.run_completion_received = False
+        self.run_post_completion_samples = 0
         self.btn_run.configure(state="disabled")
         self.btn_stop.configure(state="normal")
 
@@ -1320,6 +1404,9 @@ class App(tk.Tk):
 
         def do_move():
             if self.logging and self.run_active:
+                self.uno_issued_steps = 0
+                self.uno_move_started = False
+                self.run_completion_received = False
                 self.send_uno(f"MOVE {dist_mm:.3f} {direction} {speed_cm_s:.1f}")
                 self.run_moving          = True
                 self.run_started_move    = True
@@ -1336,6 +1423,19 @@ class App(tk.Tk):
                 self._auto_finish_id = self.after(move_duration_ms, self._auto_finish_if_still_running)
 
         self.move_after_id = self.after(int(MOVE_START_DELAY_S * 1000), do_move)
+
+    def _end_aborted_run(self, reason):
+        """Save the last real count; make any interrupted run visibly incomplete."""
+        if getattr(self, "_auto_finish_id", None) is not None:
+            try: self.after_cancel(self._auto_finish_id)
+            except: pass
+            self._auto_finish_id = None
+        # No invented force row on abort: retain only genuine Nano samples.
+        self.run_active = False
+        self.run_moving = False
+        self.run_started_move = False
+        self._finish_run_logging()
+        self.run_status.set(reason)
 
     def _finish_run_logging(self):
         """Close the log file after an auto-stop (MOVE_DONE).
@@ -1357,17 +1457,18 @@ class App(tk.Tk):
         self.log_writer = None
         self.btn_stop.configure(state="disabled")
         self.btn_run.configure(state="normal")
-        self.run_status.set("Run complete — saved.")
+        if self.run_completion_received and not self.run_post_completion_samples:
+            self.run_status.set("Run complete — saved. No post-completion Nano force sample received; the final recorded row may precede 10 cm.")
+        else:
+            self.run_status.set("Run complete — saved.")
 
     def _auto_finish_if_still_running(self):
-        """Fallback called when EVENT,MOVE_DONE never arrives from Uno.
-        If the run is still active, treat it as complete."""
+        """Communication watchdog: stop Uno, mark run incomplete, never claim success."""
         self._auto_finish_id = None
         if self.run_active:
-            self.run_moving       = False
-            self.run_active       = False
-            self.run_started_move = False
-            self.after(200, self._finish_run_logging)
+            self.send_uno("OFF")
+            self._end_aborted_run("WARNING: MOVE_DONE not received. OFF sent; run incomplete. Check Uno and hardware.")
+            messagebox.showwarning("Movement timeout", "No MOVE_DONE from Uno. OFF sent; saved data are incomplete. Verify motors are stopped.")
 
     def on_stop_sample(self):
         """Manual stop — abort motor and close log immediately."""
