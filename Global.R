@@ -1,6 +1,6 @@
 ###########################################################################
-# TARTAN: a transparent, calibratable fibre transfer platform
-#         based on repurposed motion systems
+# TARTAN: a transparent, calibratable device for controlled 
+#         fibre transfer experiments and reproducible ground-truth data generation
 #
 # Virginie Galais1*, Cameron Anderson2, Niamh Nic Daéid1, Hervé Ménard1
 # 1 Leverhulme Research Centre for Forensic Science,
@@ -34,14 +34,15 @@
 #
 #   PIPELINE A — Load cell characterisation (for the paper / device validation)
 #   ─────────────────────────────────────────────────────────────────────────
-#   Purpose : Characterises the TARTAN load cell across multiple sessions
-#             using full multi-weight calibration curves. Quantifies drift,
-#             linearity, and metrological validity via chi-squared criterion
-#             (following Galais 2024, Appendix 4).
-#   Input   : Data/Calibration curve/*_CalibrationRaw_*LoadRange_weights_*.csv
-#   Output  : Figures and tables documenting load cell behaviour.
+#   Purpose : Characterises the TARTAN load cell: raw K-factor stability, and
+#             multi-weight calibration curves across several sessions.
+#             Quantifies drift, linearity, and metrological validity via the
+#             chi-squared criterion (following Galais 2024, Appendix 4).
+#   Input   : Data/K_characterisation.csv
+#             Data/Calibration curve/*_CalibrationRaw_*LoadRange_weights_*.csv
+#   Output  : Results/Load-cell_characterisation/
 #             Does NOT feed into the friction data analysis.
-#   Script  : Code/01_LoadCell_Characterisation.R
+#   Script  : Code/1A_Loadcell_characterisation_SI.R
 #
 #   PIPELINE B — Friction data analysis (for reproducing experimental results)
 #   ─────────────────────────────────────────────────────────────────────────
@@ -50,37 +51,36 @@
 #             the before/after load cell checks bracketing each experiment,
 #             extracts static and dynamic friction coefficients, propagates
 #             measurement uncertainties (GUM framework), and runs statistical
-#             analyses (ART ANOVA, Tukey post-hoc).
-#   Input   : Data/COF/*_CalibrationRaw_LoadCell_before/after.csv
+#             analyses (Kruskal-Wallis, Dunn post-hoc with Holm adjustment).
+#   Input   : Data/COF/*_CalibrationRaw_LoadCell_before.csv / _after.csv
 #             Data/COF/*_[weight]g_Rep[n]_run[speed].csv
-#   Output  : Corrected friction coefficients, summary statistics,
-#             boxplots, ANOVA results.
-#   Scripts : Code/01_Calibration_Check.R  → calibration_parameters.csv
-#             Code/02_Friction_Extraction.R → all_results.csv
-#             Code/03_Analysis.R            → corrected results + figures
+#   Output  : Results/Session-Specific_Calibration_Check/
+#   Scripts : Code/1B_Session_Calibration_for_Transfer.R
+#                                    → Session_calibration_parameters.csv
+#             Code/2_Friction_extraction_Raw.R
+#                                    → all_results_uncorrected.csv
+#             Code/3_Transfer_Analysis_corrected.R
+#                                    → corrected results, statistics + figures
 #
 # ---- HOW TO USE -------------------------------------------------------------
 #
-#   To reproduce the paper's load cell characterisation figures only:
-#     source("Code/01_LoadCell_Characterisation.R")
-#
-#   To reproduce the full friction data analysis:
-#     source("Global.R")   ← runs scripts B1, B2, B3 in sequence
-#
+#   source("Global.R") runs Pipeline A and then Pipeline B (1B → 2 → 3).
+#   Set run_pipeline_A / run_pipeline_B below to run only one of them.
 #   Scripts must be run in order within each pipeline.
 #   Pipeline A and Pipeline B are fully independent of each other.
 #
 # ---- REQUIRED FOLDER STRUCTURE ----------------------------------------------
 #
 #   Data/
+#     K_characterisation.csv
 #     Calibration curve/   ← multi-weight drift study files (Pipeline A)
 #     COF/                 ← experiment files + before/after checks (Pipeline B)
 #   Results/               ← created automatically
 #   Code/
-#     01_LoadCell_Characterisation.R
-#     01_Calibration_Check.R
-#     02_Friction_Extraction.R
-#     03_Analysis.R
+#     1A_Loadcell_characterisation_SI.R
+#     1B_Session_Calibration_for_Transfer.R
+#     2_Friction_extraction_Raw.R
+#     3_Transfer_Analysis_corrected.R
 #
 # -----------------------------------------------------------------------------
 
@@ -88,28 +88,27 @@
 rm(list = ls())
 
 # ---- Libraries --------------------------------------------------------------
-library(tidyverse)
-library(ggplot2)
+library(tidyverse)   # dplyr, readr, tidyr, purrr, stringr, ggplot2
+library(patchwork)   # |, /, wrap_plots(), plot_annotation()
+library(grid)        # textGrob(), gpar() in Script 3
+library(FSA)         # dunnTest() in Script 3
+library(ggpubr)      # ggarrange(), annotate_figure() in Script 3
 library(RColorBrewer)
-library(patchwork)
-library(cowplot)
-library(grid)
-library(car)
-library(FSA)
-library(multcomp)
-library(ARTool)
-library(emmeans)
-library(ggrepel)
-library(ggpubr)
 
 # ---- Output directory -------------------------------------------------------
 Results.dir <- "Results/"
 dir.create(Results.dir, showWarnings = FALSE, recursive = TRUE)
 
-# ---- Run Pipeline B (friction data analysis) --------------------------------
-# To run Pipeline A instead, source 01_LoadCell_Characterisation.R directly.
+# ---- Run pipelines ----------------------------------------------------------
+run_pipeline_A <- TRUE
+run_pipeline_B <- TRUE
 
-source("Code/1A_Loadcell_characterisation_SI.R")
-source("Code/1B_Session_Calibration_for_Transfer.R")
-source("Code/2_Friction_extraction_Raw.R")
-source("Code/3_Transfer_Analysis_corrected.R")
+if (run_pipeline_A) {
+  source("Code/1A_Loadcell_characterisation_SI.R")
+}
+
+if (run_pipeline_B) {
+  source("Code/1B_Session_Calibration_for_Transfer.R")
+  source("Code/2_Friction_extraction_Raw.R")
+  source("Code/3_Transfer_Analysis_corrected.R")
+}
